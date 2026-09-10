@@ -1,0 +1,548 @@
+/**
+ * Ocupació dels pàrquings Saba de Terrassa
+ * Cloudflare Worker: captura cada minut (cron), agregat horari, API oberta i dashboard.
+ */
+
+export interface Env {
+  DB: D1Database;
+  ASSETS: Fetcher;
+  LOCAL_TZ?: string;
+}
+
+const USER_AGENT =
+  "parking-terrassa-dataset/1.0 (open parking occupancy dataset; Cloudflare Workers)";
+const FETCH_TIMEOUT_MS = 20_000;
+const SPARK_MINUTES = 180;
+const CRON_HOURLY = "7 * * * *";
+/** Pàrquings a tocar del Portal de Sant Roc: Plaça Vella (54) i Ajuntament-Mercat (55). */
+const SANT_ROC_PARKINGS = [54, 55] as const;
+
+// ---------------------------------------------------------------------------
+// Tipus de files de D1
+// ---------------------------------------------------------------------------
+
+interface ParkingRow {
+  id: number;
+  slug: string;
+  name: string;
+  url: string;
+  capacity: number;
+  lat: number;
+  lon: number;
+}
+
+interface ReadingRow {
+  ts: number;
+  parking_id: number;
+  slug: string;
+  capacity: number;
+  available: number;
+}
+
+interface LatestRow extends ReadingRow {
+  name: string;
+}
+
+interface HourlyRow {
+  hour_ts: number;
+  parking_id: number;
+  slug: string;
+  capacity: number;
+  n: number;
+  avg_available: number;
+  min_available: number;
+  max_available: number;
+}
+
+interface HeatmapRow {
+  parking_id: number;
+  slug: string;
+  local_dow: number;
+  local_hour: number;
+  avg_occupancy_pct: number;
+  n: number;
+}
+
+interface SantRocDayRow {
+  day: string;
+  minutes: number;
+  min_free: number;
+  min_ts: number;
+  minutes_below: number;
+}
+
+interface ErrorRow {
+  ts: number;
+  parking_id: number | null;
+  message: string;
+}
+
+// ---------------------------------------------------------------------------
+// Tipus de sortida de l'API
+// ---------------------------------------------------------------------------
+
+export interface OccupancyRecord {
+  timestamp_utc: string;
+  timestamp_local: string;
+  parking_id: number;
+  parking_slug: string;
+  capacity: number;
+  available: number;
+  occupied: number;
+  occupancy_pct: number;
+}
+
+interface LocalParts {
+  local_date: string;
+  local_hour: number;
+  local_minute: number;
+  local_dow: number;
+}
+
+type ScrapeOutcome =
+  | { id: number; capacity: number; available: number; error?: undefined }
+  | { id: number; error: string };
+
+// ---------------------------------------------------------------------------
+// Utilitats de temps (hora local Europe/Madrid)
+// ---------------------------------------------------------------------------
+
+const DOW_INDEX: Record<string, number> = { Mon: 0, Tue: 1, Wed: 2, Thu: 3, Fri: 4, Sat: 5, Sun: 6 };
+
+function localParts(date: Date, tz: string): LocalParts {
+  const fmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    weekday: "short",
+  });
+  const p: Record<string, string> = {};
+  for (const part of fmt.formatToParts(date)) p[part.type] = part.value;
+  return {
+    local_date: `${p.year}-${p.month}-${p.day}`,
+    local_hour: Number(p.hour) % 24, // alguns runtimes retornen "24" a mitjanit
+    local_minute: Number(p.minute),
+    local_dow: DOW_INDEX[p.weekday ?? ""] ?? 0,
+  };
+}
+
+function isoUtc(ts: number): string {
+  return new Date(ts * 1000).toISOString().replace(".000Z", "Z");
+}
+
+function localIso(ts: number, tz: string): string {
+  const d = new Date(ts * 1000);
+  const p = localParts(d, tz);
+  const utcMinutes = d.getUTCHours() * 60 + d.getUTCMinutes();
+  const localMinutes = p.local_hour * 60 + p.local_minute;
+  let off = localMinutes - utcMinutes;
+  if (off > 720) off -= 1440;
+  if (off < -720) off += 1440;
+  const sign = off >= 0 ? "+" : "-";
+  const a = Math.abs(off);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${p.local_date}T${pad(p.local_hour)}:${pad(p.local_minute)}:00${sign}${pad(Math.floor(a / 60))}:${pad(a % 60)}`;
+}
+
+// ---------------------------------------------------------------------------
+// Captura
+// ---------------------------------------------------------------------------
+
+const AVAILABLE_RE =
+  /Places:\s*<strong>\s*(\d+)\s*<\/strong>[\s\S]*?Places disponibles:\s*<strong>\s*(\d+)\s*<\/strong>/;
+
+export function parseOccupancy(html: string): { capacity: number; available: number } {
+  const i = html.indexOf('class="available-places"');
+  if (i < 0) throw new Error("no s'ha trobat el bloc 'available-places'");
+  const m = AVAILABLE_RE.exec(html.slice(i, i + 600));
+  if (!m) throw new Error("bloc 'available-places' amb format inesperat");
+  const capacity = Number(m[1]);
+  const available = Number(m[2]);
+  if (available > capacity) throw new Error(`disponibles (${available}) > capacitat (${capacity})`);
+  return { capacity, available };
+}
+
+async function fetchPage(url: string): Promise<string> {
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent": USER_AGENT,
+      "Accept-Language": "ca,es;q=0.8",
+      "Cache-Control": "no-cache",
+    },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    cf: { cacheTtl: 0 },
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.text();
+}
+
+function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+async function scrapeAll(env: Env, now = new Date()): Promise<{ ts: number; outcomes: ScrapeOutcome[] }> {
+  const tz = env.LOCAL_TZ ?? "Europe/Madrid";
+  const ts = Math.floor(now.getTime() / 60_000) * 60;
+  const lp = localParts(new Date(ts * 1000), tz);
+  const { results: parkings } = await env.DB.prepare("SELECT id, url FROM parkings").all<Pick<ParkingRow, "id" | "url">>();
+
+  const outcomes = await Promise.all(
+    parkings.map(async (p): Promise<ScrapeOutcome> => {
+      try {
+        return { id: p.id, ...parseOccupancy(await fetchPage(p.url)) };
+      } catch (e) {
+        return { id: p.id, error: errorMessage(e) };
+      }
+    }),
+  );
+
+  const ins = env.DB.prepare(
+    "INSERT OR REPLACE INTO readings (ts, parking_id, capacity, available, local_date, local_hour, local_dow) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  );
+  const err = env.DB.prepare("INSERT INTO scrape_errors (ts, parking_id, message) VALUES (?, ?, ?)");
+  const stmts = outcomes.map((o) =>
+    o.error !== undefined
+      ? err.bind(ts, o.id, o.error)
+      : ins.bind(ts, o.id, o.capacity, o.available, lp.local_date, lp.local_hour, lp.local_dow),
+  );
+  if (stmts.length) await env.DB.batch(stmts);
+  return { ts, outcomes };
+}
+
+async function aggregateHourly(env: Env, now = new Date()): Promise<void> {
+  const currentHour = Math.floor(now.getTime() / 3_600_000) * 3600;
+  const from = currentHour - 3 * 3600; // reagrupem les 3 últimes hores tancades
+  await env.DB.prepare(
+    `INSERT OR REPLACE INTO hourly
+       (hour_ts, parking_id, local_date, local_hour, local_dow, n, capacity, avg_available, min_available, max_available)
+     SELECT (ts / 3600) * 3600, parking_id, MIN(local_date), MIN(local_hour), MIN(local_dow),
+            COUNT(*), MAX(capacity), AVG(available), MIN(available), MAX(available)
+     FROM readings
+     WHERE ts >= ?1 AND ts < ?2
+     GROUP BY (ts / 3600) * 3600, parking_id`,
+  )
+    .bind(from, currentHour)
+    .run();
+}
+
+// ---------------------------------------------------------------------------
+// Respostes
+// ---------------------------------------------------------------------------
+
+const CSV_HEADER =
+  "timestamp_utc,timestamp_local,parking_id,parking_slug,capacity,available,occupied,occupancy_pct\n";
+
+const pct = (capacity: number, available: number): number =>
+  Math.round((1000 * (capacity - available)) / capacity) / 10;
+
+function rowToRecord(r: ReadingRow, tz: string): OccupancyRecord {
+  return {
+    timestamp_utc: isoUtc(r.ts),
+    timestamp_local: localIso(r.ts, tz),
+    parking_id: r.parking_id,
+    parking_slug: r.slug,
+    capacity: r.capacity,
+    available: r.available,
+    occupied: r.capacity - r.available,
+    occupancy_pct: pct(r.capacity, r.available),
+  };
+}
+
+function toCsv(records: OccupancyRecord[]): string {
+  let out = CSV_HEADER;
+  for (const x of records) {
+    out += `${x.timestamp_utc},${x.timestamp_local},${x.parking_id},${x.parking_slug},${x.capacity},${x.available},${x.occupied},${x.occupancy_pct}\n`;
+  }
+  return out;
+}
+
+interface ResponseOpts {
+  status?: number;
+  maxAge?: number;
+}
+
+function json(data: unknown, { status = 200, maxAge = 60 }: ResponseOpts = {}): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control": `public, max-age=${maxAge}`,
+    },
+  });
+}
+
+function csv(text: string, filename: string, { maxAge = 60 }: ResponseOpts = {}): Response {
+  return new Response(text, {
+    headers: {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `inline; filename="${filename}"`,
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control": `public, max-age=${maxAge}`,
+    },
+  });
+}
+
+async function queryReadings(env: Env, where: string, binds: (string | number)[]): Promise<ReadingRow[]> {
+  const { results } = await env.DB.prepare(
+    `SELECT r.ts, r.parking_id, p.slug, r.capacity, r.available
+     FROM readings r JOIN parkings p ON p.id = r.parking_id
+     WHERE ${where}
+     ORDER BY r.ts, r.parking_id`,
+  )
+    .bind(...binds)
+    .all<ReadingRow>();
+  return results;
+}
+
+/** Cache a la vora (edge) per no repetir lectures a D1 per a dades tancades. */
+async function withCache(request: Request, maxAge: number, producer: () => Promise<Response>): Promise<Response> {
+  const cache = caches.default;
+  const key = new Request(new URL(request.url).toString(), { method: "GET" });
+  const hit = await cache.match(key);
+  if (hit) return hit;
+  const res = await producer();
+  if (res.ok && maxAge > 0) {
+    const copy = new Response(res.body, res);
+    copy.headers.set("Cache-Control", `public, max-age=${maxAge}`);
+    await cache.put(key, copy.clone());
+    return copy;
+  }
+  return res;
+}
+
+// ---------------------------------------------------------------------------
+// API
+// ---------------------------------------------------------------------------
+
+async function handleApi(request: Request, env: Env): Promise<Response> {
+  const tz = env.LOCAL_TZ ?? "Europe/Madrid";
+  const url = new URL(request.url);
+  const path = url.pathname;
+  const today = localParts(new Date(), tz).local_date;
+  const isPast = (day: string) => day < today;
+  const nowTs = Math.floor(Date.now() / 1000);
+
+  if (path === "/api/parkings") {
+    const { results } = await env.DB.prepare("SELECT * FROM parkings ORDER BY id").all<ParkingRow>();
+    return json(results, { maxAge: 3600 });
+  }
+
+  if (path === "/api/latest") {
+    const { results } = await env.DB.prepare(
+      `SELECT r.ts, r.parking_id, p.slug, p.name, r.capacity, r.available
+       FROM readings r JOIN parkings p ON p.id = r.parking_id
+       WHERE r.ts >= ?1 ORDER BY r.ts, r.parking_id`,
+    )
+      .bind(nowTs - SPARK_MINUTES * 60)
+      .all<LatestRow>();
+    const byParking = new Map<number, { last: LatestRow; spark: [number, number][] }>();
+    for (const r of results) {
+      const e = byParking.get(r.parking_id);
+      if (e) {
+        e.last = r;
+        e.spark.push([r.ts, r.available]);
+      } else byParking.set(r.parking_id, { last: r, spark: [[r.ts, r.available]] });
+    }
+    const parkings = [...byParking.values()].map(({ last, spark }) => ({
+      parking_id: last.parking_id,
+      parking_slug: last.slug,
+      name: last.name,
+      timestamp_utc: isoUtc(last.ts),
+      timestamp_local: localIso(last.ts, tz),
+      capacity: last.capacity,
+      available: last.available,
+      occupied: last.capacity - last.available,
+      occupancy_pct: pct(last.capacity, last.available),
+      spark,
+    }));
+    return json({ generated_at: isoUtc(nowTs), parkings }, { maxAge: 30 });
+  }
+
+  if (path === "/api/status") {
+    const [last, count, errs] = await env.DB.batch<Record<string, unknown>>([
+      env.DB.prepare("SELECT MAX(ts) AS ts, MIN(ts) AS first_ts FROM readings"),
+      env.DB.prepare("SELECT COUNT(*) AS n FROM readings"),
+      env.DB.prepare("SELECT ts, parking_id, message FROM scrape_errors ORDER BY ts DESC LIMIT 20"),
+    ]);
+    const l = (last?.results[0] ?? {}) as { ts: number | null; first_ts: number | null };
+    const n = (count?.results[0] as { n: number } | undefined)?.n ?? 0;
+    const recent = (errs?.results ?? []) as unknown as ErrorRow[];
+    return json(
+      {
+        last_reading_utc: l.ts ? isoUtc(l.ts) : null,
+        first_reading_utc: l.first_ts ? isoUtc(l.first_ts) : null,
+        readings: n,
+        recent_errors: recent.map((e) => ({ ...e, ts: isoUtc(e.ts) })),
+      },
+      { maxAge: 30 },
+    );
+  }
+
+  // /api/day/AAAA-MM-DD (json)  |  /data/AAAA-MM-DD.csv
+  const dayMatch = path.match(/^\/api\/day\/(\d{4}-\d{2}-\d{2})$/) ?? path.match(/^\/data\/(\d{4}-\d{2}-\d{2})\.csv$/);
+  if (dayMatch) {
+    const day = dayMatch[1] as string;
+    const asCsv = path.endsWith(".csv");
+    const past = isPast(day);
+    const maxAge = past ? 86_400 : 60;
+    return withCache(request, past ? 86_400 : 0, async () => {
+      const recs = (await queryReadings(env, "r.local_date = ?1", [day])).map((r) => rowToRecord(r, tz));
+      return asCsv ? csv(toCsv(recs), `parking-terrassa-${day}.csv`, { maxAge }) : json(recs, { maxAge });
+    });
+  }
+
+  // /data/AAAA-MM.csv (mes sencer)
+  const monthMatch = path.match(/^\/data\/(\d{4}-\d{2})\.csv$/);
+  if (monthMatch) {
+    const month = monthMatch[1] as string;
+    const past = month < today.slice(0, 7);
+    return withCache(request, past ? 86_400 : 0, async () => {
+      const rows = await queryReadings(env, "r.local_date >= ?1 AND r.local_date < ?2", [`${month}-01`, `${month}-32`]);
+      return csv(toCsv(rows.map((r) => rowToRecord(r, tz))), `parking-terrassa-${month}.csv`, {
+        maxAge: past ? 86_400 : 300,
+      });
+    });
+  }
+
+  if (path === "/api/hourly") {
+    const days = Math.min(Math.max(Number(url.searchParams.get("days") ?? 7) || 7, 1), 92);
+    const { results } = await env.DB.prepare(
+      `SELECT h.hour_ts, h.parking_id, p.slug, h.capacity, h.n, h.avg_available, h.min_available, h.max_available
+       FROM hourly h JOIN parkings p ON p.id = h.parking_id
+       WHERE h.hour_ts >= ?1 ORDER BY h.hour_ts, h.parking_id`,
+    )
+      .bind(nowTs - days * 86_400)
+      .all<HourlyRow>();
+    return json(
+      results.map((r) => ({
+        hour_utc: isoUtc(r.hour_ts),
+        hour_local: localIso(r.hour_ts, tz),
+        parking_id: r.parking_id,
+        parking_slug: r.slug,
+        capacity: r.capacity,
+        n: r.n,
+        avg_available: Math.round(r.avg_available * 10) / 10,
+        min_available: r.min_available,
+        max_available: r.max_available,
+        avg_occupancy_pct: pct(r.capacity, r.avg_available),
+      })),
+      { maxAge: 300 },
+    );
+  }
+
+  if (path === "/api/heatmap") {
+    const weeks = Math.min(Math.max(Number(url.searchParams.get("weeks") ?? 8) || 8, 1), 52);
+    const { results } = await env.DB.prepare(
+      `SELECT h.parking_id, p.slug, h.local_dow, h.local_hour,
+              AVG(100.0 * (h.capacity - h.avg_available) / h.capacity) AS avg_occupancy_pct,
+              SUM(h.n) AS n
+       FROM hourly h JOIN parkings p ON p.id = h.parking_id
+       WHERE h.hour_ts >= ?1
+       GROUP BY h.parking_id, h.local_dow, h.local_hour
+       ORDER BY h.parking_id, h.local_dow, h.local_hour`,
+    )
+      .bind(nowTs - weeks * 7 * 86_400)
+      .all<HeatmapRow>();
+    return json(
+      {
+        weeks,
+        cells: results.map((r) => ({
+          parking_id: r.parking_id,
+          parking_slug: r.slug,
+          dow: r.local_dow,
+          hour: r.local_hour,
+          avg_occupancy_pct: Math.round(r.avg_occupancy_pct * 10) / 10,
+          n: r.n,
+        })),
+      },
+      { maxAge: 600 },
+    );
+  }
+
+  // /api/santroc?days=30&threshold=25 : places lliures combinades dels pàrquings propers al Portal de Sant Roc
+  if (path === "/api/santroc") {
+    const days = Math.min(Math.max(Number(url.searchParams.get("days") ?? 30) || 30, 1), 366);
+    const threshold = Math.min(Math.max(Number(url.searchParams.get("threshold") ?? 25) || 25, 1), 500);
+    const fromDay = localParts(new Date(Date.now() - (days - 1) * 86_400_000), tz).local_date;
+    const ids = SANT_ROC_PARKINGS.join(",");
+    const [cap, rows] = await env.DB.batch<Record<string, unknown>>([
+      env.DB.prepare(`SELECT SUM(capacity) AS capacity FROM parkings WHERE id IN (${ids})`),
+      // SQLite: amb un únic MIN() a la consulta, la columna nua "ts" pren el valor de la fila del mínim.
+      env.DB.prepare(
+        `SELECT day, COUNT(*) AS minutes, MIN(free) AS min_free, ts AS min_ts,
+                SUM(CASE WHEN free < ?2 THEN 1 ELSE 0 END) AS minutes_below
+         FROM (
+           SELECT ts, MIN(local_date) AS day, SUM(available) AS free
+           FROM readings
+           WHERE parking_id IN (${ids}) AND local_date >= ?1
+           GROUP BY ts
+           HAVING COUNT(*) = ${SANT_ROC_PARKINGS.length}
+         )
+         GROUP BY day ORDER BY day`,
+      ).bind(fromDay, threshold),
+    ]);
+    const capacity = Number((cap?.results[0] as { capacity: number | null } | undefined)?.capacity ?? 0);
+    const dayRows = (rows?.results ?? []) as unknown as SantRocDayRow[];
+    return json(
+      {
+        parking_ids: [...SANT_ROC_PARKINGS],
+        capacity,
+        threshold,
+        days: dayRows.map((r) => ({
+          day: r.day,
+          minutes: r.minutes,
+          min_free: r.min_free,
+          min_at_utc: isoUtc(r.min_ts),
+          min_at_local: localIso(r.min_ts, tz),
+          minutes_below: r.minutes_below,
+        })),
+      },
+      { maxAge: 300 },
+    );
+  }
+
+  if (path === "/api/days") {
+    const { results } = await env.DB.prepare(
+      "SELECT local_date AS day, COUNT(*) AS rows_ FROM readings GROUP BY local_date ORDER BY local_date DESC LIMIT 400",
+    ).all<{ day: string; rows_: number }>();
+    return json(results.map((r) => ({ day: r.day, rows: r.rows_ })), { maxAge: 300 });
+  }
+
+  return json({ error: "no trobat" }, { status: 404 });
+}
+
+// ---------------------------------------------------------------------------
+// Entrades del Worker
+// ---------------------------------------------------------------------------
+
+export default {
+  async fetch(request, env): Promise<Response> {
+    const { pathname } = new URL(request.url);
+    if (pathname.startsWith("/api/") || pathname.startsWith("/data/")) {
+      try {
+        return await handleApi(request, env);
+      } catch (e) {
+        console.error("api error", e);
+        return json({ error: "error intern", detail: errorMessage(e) }, { status: 500, maxAge: 0 });
+      }
+    }
+    return env.ASSETS.fetch(request);
+  },
+
+  async scheduled(event, env, ctx): Promise<void> {
+    if (event.cron === CRON_HOURLY) {
+      ctx.waitUntil(aggregateHourly(env, new Date(event.scheduledTime)));
+      return;
+    }
+    const r = await scrapeAll(env, new Date(event.scheduledTime));
+    const summary = r.outcomes
+      .map((o) => (o.error !== undefined ? `${o.id}:ERR(${o.error})` : `${o.id}:${o.available}/${o.capacity}`))
+      .join(" ");
+    console.log(`scrape ${isoUtc(r.ts)} ${summary}`);
+  },
+} satisfies ExportedHandler<Env>;

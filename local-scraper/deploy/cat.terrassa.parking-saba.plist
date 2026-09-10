@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>cat.terrassa.parking-saba</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/python3</string>
+        <string>/Users/marc/Documents/parking_terrassa/scrape.py</string>
+        <string>--loop</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/marc/Documents/parking_terrassa</string>
+
+    <!-- Arrenca en iniciar sessió i es reinicia si mor. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/marc/Documents/parking_terrassa/logs/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/marc/Documents/parking_terrassa/logs/launchd.err.log</string>
+</dict>
+</plist>

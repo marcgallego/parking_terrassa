@@ -1,0 +1,2 @@
+# Captura cada minut (Linux / macOS amb cron). Ajusta les rutes.
+* * * * * cd /Users/marc/Documents/parking_terrassa && /usr/bin/env python3 scrape.py --once >> logs/cron.log 2>&1

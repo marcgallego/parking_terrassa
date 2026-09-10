@@ -1,0 +1,46 @@
+{
+  "profile": "tabular-data-package",
+  "name": "parking-saba-terrassa",
+  "title": "Ocupació dels pàrquings Saba de Terrassa",
+  "description": "Sèrie temporal amb resolució d'1 minut de places totals i disponibles dels tres pàrquings Saba de Terrassa (Plaça Vella, Ajuntament-Mercat i Dr. Robert), obtinguda de les fitxes públiques de saba.es. Els fitxers es generen sota demanda: /data/AAAA-MM-DD.csv (un dia) i /data/AAAA-MM.csv (un mes).",
+  "licenses": [
+    { "name": "CC-BY-4.0", "path": "https://creativecommons.org/licenses/by/4.0/", "title": "Creative Commons Attribution 4.0" }
+  ],
+  "sources": [
+    { "title": "Saba Infraestructures - Parking Saba Plaça Vella", "path": "https://www.saba.es/ca/parking-terrassa/parking-saba-placa-vella" },
+    { "title": "Saba Infraestructures - Parking Saba Ajuntament Mercat", "path": "https://www.saba.es/ca/parking-terrassa/parking-saba-ajuntament-mercat" },
+    { "title": "Saba Infraestructures - Parking Saba Dr. Robert", "path": "https://www.saba.es/ca/parking-terrassa/parking-saba-dr.-robert" }
+  ],
+  "resources": [
+    {
+      "name": "occupancy",
+      "title": "Ocupació per minut",
+      "path": "data/{AAAA-MM-DD}.csv",
+      "format": "csv",
+      "mediatype": "text/csv",
+      "encoding": "utf-8",
+      "dialect": { "delimiter": ",", "header": true, "lineTerminator": "\n" },
+      "schema": {
+        "fields": [
+          { "name": "timestamp_utc", "type": "datetime", "format": "%Y-%m-%dT%H:%M:%SZ", "description": "Instant de la captura en UTC, truncat al minut." },
+          { "name": "timestamp_local", "type": "string", "description": "El mateix instant en hora local (Europe/Madrid), ISO 8601 amb desplaçament." },
+          { "name": "parking_id", "type": "integer", "description": "Identificador del pàrquing a saba.es (vegeu /api/parkings)." },
+          { "name": "parking_slug", "type": "string", "description": "placa-vella, ajuntament-mercat o dr-robert." },
+          { "name": "capacity", "type": "integer", "description": "Places totals publicades per Saba." },
+          { "name": "available", "type": "integer", "description": "Places lliures en el moment de la captura." },
+          { "name": "occupied", "type": "integer", "description": "capacity - available." },
+          { "name": "occupancy_pct", "type": "number", "description": "100 * occupied / capacity, arrodonit a una decimal." }
+        ],
+        "primaryKey": ["timestamp_utc", "parking_id"]
+      }
+    },
+    {
+      "name": "parkings",
+      "title": "Fitxa dels pàrquings",
+      "path": "api/parkings",
+      "format": "json",
+      "mediatype": "application/json",
+      "description": "Identificador, nom, URL d'origen, capacitat i coordenades de cada pàrquing."
+    }
+  ]
+}

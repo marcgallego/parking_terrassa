@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "lib": ["ES2022"],
+    "types": ["@cloudflare/workers-types"],
+    "rootDir": "src",
+    "tsBuildInfoFile": ".wrangler/tsbuildinfo.worker"
+  },
+  "files": [],
+  "include": ["src/**/*.ts"]
+}

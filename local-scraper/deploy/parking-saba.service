@@ -1,0 +1,18 @@
+# systemd (Linux). Instal·lació:
+#   sudo cp deploy/parking-saba.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now parking-saba
+[Unit]
+Description=Scraper d'ocupació dels pàrquings Saba de Terrassa
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=marc
+WorkingDirectory=/home/marc/parking_terrassa
+ExecStart=/usr/bin/python3 /home/marc/parking_terrassa/scrape.py --loop
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,31 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "parking",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "workers_dev": true,
+  "observability": { "enabled": true },
+
+  // Cada minut: captura. Al minut 7 de cada hora: agregat horari.
+  "triggers": { "crons": ["* * * * *", "7 * * * *"] },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "parking-terrassa",
+      // Substitueix-ho per l'id que retorna `wrangler d1 create parking-terrassa`.
+      "database_id": "e8a97e0f-eb24-41fb-ab4f-61ae72d8e6ba",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*", "/data/*"]
+  },
+
+  "vars": {
+    "LOCAL_TZ": "Europe/Madrid"
+  }
+}

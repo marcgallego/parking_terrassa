@@ -1,0 +1,29 @@
+[
+  {
+    "id": 54,
+    "slug": "placa-vella",
+    "name": "Parking Saba Plaça Vella - Terrassa",
+    "url": "https://www.saba.es/ca/parking-terrassa/parking-saba-placa-vella",
+    "capacity": 297,
+    "lat": 41.561540689897136,
+    "lon": 2.0101476003971945
+  },
+  {
+    "id": 55,
+    "slug": "ajuntament-mercat",
+    "name": "Parking Saba Ajuntament Mercat - Terrassa",
+    "url": "https://www.saba.es/ca/parking-terrassa/parking-saba-ajuntament-mercat",
+    "capacity": 237,
+    "lat": 41.56302979091195,
+    "lon": 2.0085544635076107
+  },
+  {
+    "id": 53,
+    "slug": "dr-robert",
+    "name": "Parking Saba Dr. Robert - Terrassa",
+    "url": "https://www.saba.es/ca/parking-terrassa/parking-saba-dr.-robert",
+    "capacity": 407,
+    "lat": 41.56351518228081,
+    "lon": 2.01758185765599
+  }
+]

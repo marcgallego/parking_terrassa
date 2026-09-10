@@ -1,0 +1,9 @@
+node_modules/
+.wrangler/
+.dev.vars
+logs/
+__pycache__/
+*.pyc
+.DS_Store
+public/app.js
+public/app.js.map
