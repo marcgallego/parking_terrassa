@@ -60,7 +60,7 @@ Endpoints (CORS obert):
 | `/api/latest` | última lectura de cada pàrquing i sèrie de les últimes 3 h |
 | `/api/hourly?days=7` | agregat horari (mitjana, mínim, màxim), fins a 92 dies |
 | `/api/heatmap?weeks=8` | ocupació mitjana per dia de la setmana i hora |
-| `/api/santroc?days=30&threshold=25` | per dia: mínim de places lliures sumant Ajuntament-Mercat i Plaça Vella, hora del mínim i minuts sota el llindar |
+| `/api/santroc?days=30&threshold=25` | per dia: mínim de places lliures sumant Ajuntament-Mercat i Plaça Vella, hora del mínim i minuts sota el llindar (10, 25 o 50) |
 | `/api/parkings` | fitxa dels pàrquings |
 | `/api/days` | dies amb dades |
 | `/api/status` | última lectura, nombre de files, errors recents |
@@ -83,6 +83,16 @@ npm run deploy                                      # typecheck + build + public
 Al cap d'un minut, `https://parking.<subdomini>.workers.dev/api/status` ha de mostrar la primera lectura. Per veure els logs en directe: `npm run tail`.
 
 Consum aproximat en el pla gratuït: 1.440 invocacions de cron i 4.320 files escrites al dia (límits: 100.000 peticions i 100.000 files escrites). Cada visita al dashboard llegeix unes 10.000 files de D1 (límit 5 milions/dia); les respostes de dies tancats es guarden a la cache de Cloudflare.
+
+## Integritat de les dades
+
+- **Escriptures idempotents**: la clau primària de `readings` és (minut, pàrquing) i s'escriu amb `INSERT OR REPLACE`. Dues execucions del mateix minut no dupliquen res. Els agregats horaris i diaris es recalculen sencers i també són idempotents.
+- **Captura independent de les lectures**: la llista de pàrquings és una constant del Worker, de manera que la captura només fa escriptures a D1. Si la quota diària de lectures s'esgotés (el dashboard la consumeix), el dashboard fallaria però les dades es continuarien capturant.
+- **Validació**: només s'escriu una fila si la pàgina conté el bloc d'ocupació amb dos enters, la capacitat és versemblant i les places lliures no superen la capacitat. Si no, es registra un error i el minut queda buit, mai amb un valor inventat.
+- **Consultes acotades**: els gràfics de setmanes i mesos llegeixen la taula `hourly`; el panell del Portal de Sant Roc llegeix `daily_santroc` (una fila per dia) i només calcula en viu el dia d'avui.
+- **Còpia fora de Cloudflare**: cada matinada una GitHub Action baixa el CSV del dia anterior i el desa a la branca [`data`](https://github.com/marcgallego/parking_terrassa/tree/data) d'aquest repositori. A més, D1 conserva 30 dies d'historial (Time Travel) per restaurar la base de dades a qualsevol instant amb `wrangler d1 time-travel restore`.
+- **Migracions**: només afegeixen taules (`CREATE TABLE IF NOT EXISTS`); cap no esborra ni modifica dades. Cal aplicar-les a mà amb `npm run db:migrate` abans de desplegar codi que les necessiti.
+- **Mida**: unes 4.320 files al dia, uns 150 MB l'any. El límit d'una base D1 al pla gratuït és de 500 MB, així que hi ha marge per a uns tres anys; després caldria arxivar anys sencers o passar al pla de pagament.
 
 ## Desenvolupament local
 

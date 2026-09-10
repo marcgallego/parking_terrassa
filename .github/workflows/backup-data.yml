@@ -1,0 +1,44 @@
+# Còpia diària de les dades fora de Cloudflare: cada matinada baixa el CSV
+# del dia anterior i el desa a la branca `data` d'aquest repositori.
+name: Còpia diària de les dades
+
+on:
+  schedule:
+    - cron: "20 1 * * *"   # 01:20 UTC = 02:20/03:20 hora local, ja passat mitjanit
+  workflow_dispatch:
+    inputs:
+      day:
+        description: "Dia a copiar (AAAA-MM-DD); per defecte, ahir"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: data
+
+      - name: Baixa el CSV del dia
+        run: |
+          set -euo pipefail
+          day="${{ github.event.inputs.day }}"
+          [ -n "$day" ] || day=$(TZ=Europe/Madrid date -d "yesterday" +%F)
+          dir="data/${day:0:4}"
+          mkdir -p "$dir"
+          curl -fsS --retry 3 "https://parking.terrassa.workers.dev/data/$day.csv" -o "$dir/$day.csv"
+          lines=$(wc -l < "$dir/$day.csv")
+          echo "$day: $lines línies"
+          if [ "$lines" -le 1 ]; then echo "El CSV no té dades"; exit 1; fi
+
+      - name: Commit i push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git diff --cached --quiet && { echo "res a canviar"; exit 0; }
+          git commit -m "data: $(git diff --cached --name-only | xargs -n1 basename | tr '\n' ' ')"
+          git push

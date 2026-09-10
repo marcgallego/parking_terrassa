@@ -14,8 +14,22 @@ const USER_AGENT =
 const FETCH_TIMEOUT_MS = 20_000;
 const SPARK_MINUTES = 180;
 const CRON_HOURLY = "7 * * * *";
+const ERROR_RETENTION_DAYS = 30;
+
+/**
+ * Pàrquings que es capturen. Es defineixen aquí (i no a D1) perquè la captura no
+ * depengui de cap lectura de la base de dades: si la quota diària de lectures
+ * s'esgotés, les escriptures continuarien igualment.
+ */
+const PARKINGS: readonly { id: number; url: string; capacity: number }[] = [
+  { id: 54, url: "https://www.saba.es/ca/parking-terrassa/parking-saba-placa-vella", capacity: 297 },
+  { id: 55, url: "https://www.saba.es/ca/parking-terrassa/parking-saba-ajuntament-mercat", capacity: 237 },
+  { id: 53, url: "https://www.saba.es/ca/parking-terrassa/parking-saba-dr.-robert", capacity: 407 },
+];
 /** Pàrquings a tocar del Portal de Sant Roc: Plaça Vella (54) i Ajuntament-Mercat (55). */
 const SANT_ROC_PARKINGS = [54, 55] as const;
+const SANT_ROC_THRESHOLDS = [10, 25, 50] as const;
+type SantRocThreshold = (typeof SANT_ROC_THRESHOLDS)[number];
 
 // ---------------------------------------------------------------------------
 // Tipus de files de D1
@@ -69,6 +83,16 @@ interface SantRocDayRow {
   min_free: number;
   min_ts: number;
   minutes_below: number;
+}
+
+interface DailySantRocRow {
+  day: string;
+  minutes: number;
+  min_free: number;
+  min_ts: number;
+  below_10: number;
+  below_25: number;
+  below_50: number;
 }
 
 interface ErrorRow {
@@ -162,6 +186,7 @@ export function parseOccupancy(html: string): { capacity: number; available: num
   if (!m) throw new Error("bloc 'available-places' amb format inesperat");
   const capacity = Number(m[1]);
   const available = Number(m[2]);
+  if (!Number.isInteger(capacity) || capacity <= 0 || capacity > 5000) throw new Error(`capacitat inversemblant (${capacity})`);
   if (available > capacity) throw new Error(`disponibles (${available}) > capacitat (${capacity})`);
   return { capacity, available };
 }
@@ -188,12 +213,12 @@ async function scrapeAll(env: Env, now = new Date()): Promise<{ ts: number; outc
   const tz = env.LOCAL_TZ ?? "Europe/Madrid";
   const ts = Math.floor(now.getTime() / 60_000) * 60;
   const lp = localParts(new Date(ts * 1000), tz);
-  const { results: parkings } = await env.DB.prepare("SELECT id, url FROM parkings").all<Pick<ParkingRow, "id" | "url">>();
-
   const outcomes = await Promise.all(
-    parkings.map(async (p): Promise<ScrapeOutcome> => {
+    PARKINGS.map(async (p): Promise<ScrapeOutcome> => {
       try {
-        return { id: p.id, ...parseOccupancy(await fetchPage(p.url)) };
+        const r = parseOccupancy(await fetchPage(p.url));
+        if (r.capacity !== p.capacity) console.warn(`parking ${p.id}: capacitat ${r.capacity} (esperada ${p.capacity})`);
+        return { id: p.id, ...r };
       } catch (e) {
         return { id: p.id, error: errorMessage(e) };
       }
@@ -227,6 +252,46 @@ async function aggregateHourly(env: Env, now = new Date()): Promise<void> {
   )
     .bind(from, currentHour)
     .run();
+}
+
+/** Recalcula l'agregat diari del Portal de Sant Roc per a un dia local (idempotent). */
+async function aggregateDailySantRoc(env: Env, day: string): Promise<void> {
+  const ids = SANT_ROC_PARKINGS.join(",");
+  await env.DB.prepare(
+    `INSERT OR REPLACE INTO daily_santroc (day, minutes, min_free, min_ts, below_10, below_25, below_50)
+     SELECT ?1, COUNT(*), MIN(free), ts,
+            SUM(CASE WHEN free < 10 THEN 1 ELSE 0 END),
+            SUM(CASE WHEN free < 25 THEN 1 ELSE 0 END),
+            SUM(CASE WHEN free < 50 THEN 1 ELSE 0 END)
+     FROM (
+       SELECT ts, SUM(available) AS free
+       FROM readings
+       WHERE parking_id IN (${ids}) AND local_date = ?1
+       GROUP BY ts
+       HAVING COUNT(*) = ${SANT_ROC_PARKINGS.length}
+     )
+     GROUP BY 1 HAVING COUNT(*) > 0`,
+  )
+    .bind(day)
+    .run();
+}
+
+/** Feina horària: agregat horari, agregats diaris tancats i neteja d'errors antics. */
+async function hourlyMaintenance(env: Env, now: Date): Promise<void> {
+  const tz = env.LOCAL_TZ ?? "Europe/Madrid";
+  await aggregateHourly(env, now);
+  const hour = localParts(now, tz).local_hour;
+  const dayBefore = (n: number): string => localParts(new Date(now.getTime() - n * 86_400_000), tz).local_date;
+  if (hour >= 1 && hour <= 3) {
+    // Just després de mitjanit: tanquem el dia d'ahir (tres intents per si un cron falla).
+    await aggregateDailySantRoc(env, dayBefore(1));
+  } else if (hour === 4) {
+    // Un cop al dia: repassem l'última setmana per cobrir dies que haguessin quedat sense agregar.
+    for (let n = 2; n <= 7; n++) await aggregateDailySantRoc(env, dayBefore(n));
+    await env.DB.prepare("DELETE FROM scrape_errors WHERE ts < ?1")
+      .bind(Math.floor(now.getTime() / 1000) - ERROR_RETENTION_DAYS * 86_400)
+      .run();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -324,7 +389,10 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
   const today = localParts(new Date(), tz).local_date;
-  const isPast = (day: string) => day < today;
+  // Un dia es considera tancat (cachejable) només 5 minuts després de mitjanit,
+  // per donar temps a l'última captura del dia.
+  const closedBefore = localParts(new Date(Date.now() - 5 * 60_000), tz).local_date;
+  const isPast = (day: string) => day < closedBefore;
   const nowTs = Math.floor(Date.now() / 1000);
 
   if (path === "/api/parkings") {
@@ -400,7 +468,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   const monthMatch = path.match(/^\/data\/(\d{4}-\d{2})\.csv$/);
   if (monthMatch) {
     const month = monthMatch[1] as string;
-    const past = month < today.slice(0, 7);
+    const past = month < closedBefore.slice(0, 7);
     return withCache(request, past ? 86_400 : 0, async () => {
       const rows = await queryReadings(env, "r.local_date >= ?1 AND r.local_date < ?2", [`${month}-01`, `${month}-32`]);
       return csv(toCsv(rows.map((r) => rowToRecord(r, tz))), `parking-terrassa-${month}.csv`, {
@@ -467,11 +535,15 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   // /api/santroc?days=30&threshold=25 : places lliures combinades dels pàrquings propers al Portal de Sant Roc
   if (path === "/api/santroc") {
     const days = Math.min(Math.max(Number(url.searchParams.get("days") ?? 30) || 30, 1), 366);
-    const threshold = Math.min(Math.max(Number(url.searchParams.get("threshold") ?? 25) || 25, 1), 500);
+    const thrParam = Number(url.searchParams.get("threshold") ?? 25);
+    const threshold: SantRocThreshold = (SANT_ROC_THRESHOLDS as readonly number[]).includes(thrParam) ? (thrParam as SantRocThreshold) : 25;
     const fromDay = localParts(new Date(Date.now() - (days - 1) * 86_400_000), tz).local_date;
     const ids = SANT_ROC_PARKINGS.join(",");
-    const [cap, rows] = await env.DB.batch<Record<string, unknown>>([
+    const [cap, closed, live] = await env.DB.batch<Record<string, unknown>>([
       env.DB.prepare(`SELECT SUM(capacity) AS capacity FROM parkings WHERE id IN (${ids})`),
+      // Dies tancats: taula precomputada (una fila per dia).
+      env.DB.prepare("SELECT * FROM daily_santroc WHERE day >= ?1 AND day < ?2 ORDER BY day").bind(fromDay, today),
+      // Avui: càlcul en viu sobre els minuts d'avui.
       // SQLite: amb un únic MIN() a la consulta, la columna nua "ts" pren el valor de la fila del mínim.
       env.DB.prepare(
         `SELECT day, COUNT(*) AS minutes, MIN(free) AS min_free, ts AS min_ts,
@@ -479,15 +551,21 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
          FROM (
            SELECT ts, MIN(local_date) AS day, SUM(available) AS free
            FROM readings
-           WHERE parking_id IN (${ids}) AND local_date >= ?1
+           WHERE parking_id IN (${ids}) AND local_date = ?1
            GROUP BY ts
            HAVING COUNT(*) = ${SANT_ROC_PARKINGS.length}
          )
-         GROUP BY day ORDER BY day`,
-      ).bind(fromDay, threshold),
+         GROUP BY day`,
+      ).bind(today, threshold),
     ]);
     const capacity = Number((cap?.results[0] as { capacity: number | null } | undefined)?.capacity ?? 0);
-    const dayRows = (rows?.results ?? []) as unknown as SantRocDayRow[];
+    const closedRows = (closed?.results ?? []) as unknown as DailySantRocRow[];
+    const liveRows = (live?.results ?? []) as unknown as SantRocDayRow[];
+    const belowKey = `below_${threshold}` as const;
+    const dayRows: SantRocDayRow[] = [
+      ...closedRows.map((r) => ({ day: r.day, minutes: r.minutes, min_free: r.min_free, min_ts: r.min_ts, minutes_below: r[belowKey] })),
+      ...liveRows,
+    ];
     return json(
       {
         parking_ids: [...SANT_ROC_PARKINGS],
@@ -536,7 +614,7 @@ export default {
 
   async scheduled(event, env, ctx): Promise<void> {
     if (event.cron === CRON_HOURLY) {
-      ctx.waitUntil(aggregateHourly(env, new Date(event.scheduledTime)));
+      ctx.waitUntil(hourlyMaintenance(env, new Date(event.scheduledTime)));
       return;
     }
     const r = await scrapeAll(env, new Date(event.scheduledTime));
