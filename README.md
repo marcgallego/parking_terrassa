@@ -2,6 +2,8 @@
 
 Dataset obert amb l'ocupació, minut a minut, dels tres pàrquings Saba de Terrassa, amb dashboard i API. Corre íntegrament a Cloudflare (Workers + D1), sense servidor propi.
 
+**Dashboard i dades**: https://parking.terrassa.workers.dev
+
 | slug | Pàrquing | Places | id Saba |
 |---|---|---|---|
 | `placa-vella` | Parking Saba Plaça Vella | 297 | 54 |
