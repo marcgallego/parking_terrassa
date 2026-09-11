@@ -626,8 +626,13 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     const day = dayMatch[1] as string;
     const asCsv = path.endsWith(".csv");
     const past = isPast(day);
+    // El dia en curs també es guarda a la cache, un minut: és la consulta que
+    // carrega el dashboard a cada visita i, sense cachejar-la, cada visitant
+    // llegia de D1 totes les files del dia. Amb un minut de vida, la despesa
+    // deixa de dependre de les visites (les captures són per minut, de manera
+    // que no s'hi perd frescor real).
     const maxAge = past ? 86_400 : 60;
-    return withCache(request, past ? 86_400 : 0, async () => {
+    return withCache(request, maxAge, async () => {
       const recs = (await queryReadings(env, "r.local_date = ?1", [day])).map((r) => rowToRecord(r, tz));
       return asCsv ? csv(toCsv(recs), `parking-terrassa-${day}.csv`, { maxAge }) : json(recs, { maxAge });
     });
@@ -748,11 +753,18 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   }
 
   if (path === "/api/days") {
-    const { results } = await env.DB.prepare(
-      "SELECT local_date AS day, COUNT(*) AS rows_ FROM readings GROUP BY local_date ORDER BY local_date DESC LIMIT 400",
-    ).all<{ day: string; rows_: number }>();
-    const out: DayCount[] = results.map((r) => ({ day: r.day, rows: r.rows_ }));
-    return json(out, { maxAge: 300 });
+    // Es compta des de `hourly` (una fila per hora i pàrquing, ~72 al dia) i no
+    // des de `readings` (~4.320 al dia): el recompte per dia hi és igualment,
+    // com a suma de `n`, i costa unes seixanta vegades menys de llegir. Un dia
+    // tancat hi és sencer; el dia en curs només hi surt fins a l'última hora
+    // agregada, i el dashboard ja no en mostra el recompte.
+    return withCache(request, 300, async () => {
+      const { results } = await env.DB.prepare(
+        "SELECT local_date AS day, SUM(n) AS rows_ FROM hourly GROUP BY local_date ORDER BY local_date DESC LIMIT 400",
+      ).all<{ day: string; rows_: number }>();
+      const out: DayCount[] = results.map((r) => ({ day: r.day, rows: r.rows_ }));
+      return json(out, { maxAge: 300 });
+    });
   }
 
   return json({ error: "no trobat" }, { status: 404 });
