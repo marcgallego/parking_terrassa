@@ -33,6 +33,8 @@ const FETCH_TIMEOUT_MS = 20_000;
 const SPARK_MINUTES = 180;
 const CRON_HOURLY = "7 * * * *";
 const ERROR_RETENTION_DAYS = 30;
+/** Caràcters de la pàgina que es desen quan no se sap llegir, per poder-la diagnosticar. */
+const ERROR_HTML_CHARS = 1000;
 /** Minuts sense cap lectura nova a partir dels quals la captura es considera aturada. */
 const STALE_ALERT_MINUTES = 15;
 /**
@@ -123,6 +125,7 @@ interface ErrorRow {
   ts: number;
   parking_id: number | null;
   message: string;
+  html?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -137,8 +140,8 @@ interface LocalParts {
 }
 
 type ScrapeOutcome =
-  | { id: number; capacity: number; available: number; error?: undefined }
-  | { id: number; error: string };
+  | { id: number; capacity: number; available: number; error?: undefined; html?: undefined }
+  | { id: number; error: string; html: string | null };
 
 // ---------------------------------------------------------------------------
 // Utilitats de temps (hora local Europe/Madrid)
@@ -192,6 +195,17 @@ export function localIso(ts: number, tz: string): string {
 const AVAILABLE_RE =
   /Places:\s*<strong>\s*(\d+)\s*<\/strong>[\s\S]*?Places disponibles:\s*<strong>\s*(\d+)\s*<\/strong>/;
 
+/**
+ * Tros de pàgina que es desa quan la captura falla: la finestra al voltant del
+ * bloc d'ocupació, o bé el principi de la pàgina si el bloc no hi és. Acotat a
+ * ERROR_HTML_CHARS perquè una pàgina d'error no ompli la base de dades.
+ */
+export function htmlSnippet(html: string): string {
+  const i = html.indexOf('class="available-places"');
+  const from = i < 0 ? 0 : Math.max(0, i - 200);
+  return html.slice(from, from + ERROR_HTML_CHARS);
+}
+
 export function parseOccupancy(html: string): { capacity: number; available: number } {
   const i = html.indexOf('class="available-places"');
   if (i < 0) throw new Error("no s'ha trobat el bloc 'available-places'");
@@ -228,12 +242,16 @@ async function scrapeAll(env: Env, now = new Date()): Promise<{ ts: number; outc
   const lp = localParts(new Date(ts * 1000), tz);
   const outcomes = await Promise.all(
     PARKINGS.map(async (p): Promise<ScrapeOutcome> => {
+      // `html` es declara fora del try perquè, si el que falla és llegir-la (i no
+      // descarregar-la), el catch la pugui desar com a prova.
+      let html: string | undefined;
       try {
-        const r = parseOccupancy(await fetchPage(p.url));
+        html = await fetchPage(p.url);
+        const r = parseOccupancy(html);
         if (r.capacity !== p.capacity) console.warn(`parking ${p.id}: capacitat ${r.capacity} (esperada ${p.capacity})`);
         return { id: p.id, ...r };
       } catch (e) {
-        return { id: p.id, error: errorMessage(e) };
+        return { id: p.id, error: errorMessage(e), html: html === undefined ? null : htmlSnippet(html) };
       }
     }),
   );
@@ -241,13 +259,13 @@ async function scrapeAll(env: Env, now = new Date()): Promise<{ ts: number; outc
   const ins = env.DB.prepare(
     "INSERT OR REPLACE INTO readings (ts, parking_id, capacity, available, local_date, local_hour, local_dow) VALUES (?, ?, ?, ?, ?, ?, ?)",
   );
-  const err = env.DB.prepare("INSERT INTO scrape_errors (ts, parking_id, message) VALUES (?, ?, ?)");
+  const err = env.DB.prepare("INSERT INTO scrape_errors (ts, parking_id, message, html) VALUES (?, ?, ?, ?)");
   const cap = env.DB.prepare(
     "INSERT OR IGNORE INTO capacity_changes (parking_id, expected, observed, ts) VALUES (?, ?, ?, ?)",
   );
   const stmts = outcomes.map((o) =>
     o.error !== undefined
-      ? err.bind(ts, o.id, o.error)
+      ? err.bind(ts, o.id, o.error, o.html)
       : ins.bind(ts, o.id, o.capacity, o.available, lp.local_date, lp.local_hour, lp.local_dow),
   );
   // La capacitat publicada pot canviar (places d'abonat, obres). Es compara amb
@@ -347,15 +365,19 @@ async function reconcileCapacities(env: Env, now: Date): Promise<number> {
  * - El total de files només es calcula si `totals` és cert, perquè és l'única
  *   consulta que no es pot acotar. Per al dia a dia hi ha `readings_today`, que
  *   va per `idx_readings_local_date`.
+ * - El tros de pàgina de cada error només es demana si `html` és cert: són fins
+ *   a 20 KB que no cal arrossegar a cada consulta horària.
  */
-async function checkHealth(env: Env, now: Date, totals = false): Promise<StatusResponse> {
+async function checkHealth(env: Env, now: Date, { totals = false, html = false } = {}): Promise<StatusResponse> {
   const nowTs = Math.floor(now.getTime() / 1000);
   const today = localParts(now, env.LOCAL_TZ ?? "Europe/Madrid").local_date;
   const stmts = [
     env.DB.prepare("SELECT MAX(ts) AS ts FROM readings"),
     env.DB.prepare("SELECT MIN(ts) AS ts FROM readings"),
     env.DB.prepare("SELECT COUNT(*) AS n FROM readings WHERE local_date = ?1").bind(today),
-    env.DB.prepare("SELECT ts, parking_id, message FROM scrape_errors ORDER BY ts DESC LIMIT 20"),
+    env.DB.prepare(
+      `SELECT ts, parking_id, message${html ? ", html" : ""} FROM scrape_errors ORDER BY ts DESC LIMIT 20`,
+    ),
     env.DB.prepare("SELECT ts, parking_id, expected, observed FROM capacity_changes ORDER BY ts DESC LIMIT 20"),
     env.DB.prepare("SELECT id, capacity FROM parkings"),
   ];
@@ -394,15 +416,21 @@ async function checkHealth(env: Env, now: Date, totals = false): Promise<StatusR
     stale_minutes: staleMinutes,
     readings_today: nToday,
     readings: n,
-    recent_errors: recent.map((e) => ({ ...e, ts: isoUtc(e.ts) })),
+    recent_errors: recent.map((e) => ({ ...e, ts: isoUtc(e.ts), html: e.html ?? null })),
     recent_capacity_changes: capRows.map((c) => ({ ...c, ts: isoUtc(c.ts) })),
   };
 }
 
 /**
  * Avisa si la captura s'ha aturat o si la capacitat publicada ha canviat.
- * Només fa res si hi ha el secret `ALERT_WEBHOOK` (Slack, Discord, ntfy...);
- * sense secret, l'estat es consulta igualment a /api/status.
+ * Només fa res si hi ha el secret `ALERT_WEBHOOK`; sense secret, l'estat es
+ * consulta igualment a /api/status.
+ *
+ * El cos porta el mateix missatge amb els dos noms de camp que fan servir els
+ * serveis habituals —`text` (Slack, Telegram) i `content` (Discord)—, i l'estat
+ * complet imbricat sota `health`, que cap d'ells no interpreta. Imbricar-lo
+ * evita que camps com `issues` o `recent_errors` acabin al primer nivell, on
+ * podrien xocar amb paràmetres del servei.
  */
 async function sendAlert(env: Env, health: StatusResponse): Promise<void> {
   if (!env.ALERT_WEBHOOK || health.healthy) return;
@@ -411,7 +439,7 @@ async function sendAlert(env: Env, health: StatusResponse): Promise<void> {
     await fetch(env.ALERT_WEBHOOK, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, ...health }),
+      body: JSON.stringify({ text, content: text, health }),
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
   } catch (e) {
@@ -581,8 +609,12 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   }
 
   if (path === "/api/status") {
-    // El total de files només si es demana: recórrer tota la taula surt car.
-    const health = await checkHealth(env, new Date(), url.searchParams.get("totals") === "1");
+    // Opcions cares, només si es demanen: el total obliga a recórrer tota la
+    // taula, i l'HTML dels errors infla la resposta.
+    const health = await checkHealth(env, new Date(), {
+      totals: url.searchParams.get("totals") === "1",
+      html: url.searchParams.get("html") === "1",
+    });
     // 503 quan la captura no va bé: així un monitor extern se n'assabenta sense
     // haver d'interpretar el cos de la resposta.
     return json(health, { status: health.healthy ? 200 : 503, maxAge: 30 });

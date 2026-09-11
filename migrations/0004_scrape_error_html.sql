@@ -1,0 +1,11 @@
+-- Desa un tros de la pàgina quan la captura no la sap llegir.
+--
+-- Fins ara, si saba.es servia el bloc 'available-places' amb un format
+-- inesperat, només se'n guardava el missatge d'error i la pàgina es perdia. Els
+-- errors es repeteixen a hores concretes (03:00 i 04:00 UTC), just quan ningú no
+-- els pot mirar en directe, de manera que sense la prova no hi ha manera de
+-- saber què va servir realment saba.es.
+--
+-- La columna és NULL si la pàgina no es va arribar a descarregar (per exemple,
+-- un error HTTP): en aquest cas no hi ha res a desar.
+ALTER TABLE scrape_errors ADD COLUMN html TEXT;
