@@ -1,7 +1,7 @@
 /** Proves de `parseOccupancy`: el punt on el projecte depèn del format de saba.es. */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseOccupancy } from "../src/index";
+import { htmlSnippet, parseOccupancy } from "../src/index";
 
 /** Fragment real d'una fitxa de saba.es (el mateix que fa servir local-scraper/tests). */
 const SAMPLE = `
@@ -57,4 +57,34 @@ test("només mira els 600 caràcters següents al bloc", () => {
   // captura fallaria (i quedaria registrada) en lloc de llegir un altre bloc.
   const far = '<div class="available-places">Places: <strong>297</strong>' + " ".repeat(700) + "Places disponibles: <strong>230</strong></div>";
   assert.throws(() => parseOccupancy(far), /format inesperat/);
+});
+
+// --- htmlSnippet: la prova que es desa quan la captura falla -----------------
+
+test("htmlSnippet centra el tros al voltant del bloc d'ocupació", () => {
+  const page = "x".repeat(5000) + SAMPLE + "y".repeat(5000);
+  const snip = htmlSnippet(page);
+  assert.ok(snip.includes('class="available-places"'), "ha de contenir el bloc");
+  assert.ok(snip.includes("297"), "ha de contenir les xifres que no s'han sabut llegir");
+});
+
+test("htmlSnippet inclou el que precedeix el bloc, per veure'n el context", () => {
+  const marker = '<div class="available-places">';
+  const page = "a".repeat(1000) + "PISTA" + "b".repeat(100) + marker + "z".repeat(1000);
+  assert.ok(htmlSnippet(page).includes("PISTA"), "ha d'agafar context d'abans del bloc");
+});
+
+test("htmlSnippet agafa el principi de la pàgina si no hi ha el bloc", () => {
+  const page = "COMENÇAMENT" + "q".repeat(5000);
+  assert.ok(htmlSnippet(page).startsWith("COMENÇAMENT"));
+});
+
+test("htmlSnippet mai no passa del límit", () => {
+  assert.equal(htmlSnippet("z".repeat(50_000)).length, 1000);
+  assert.equal(htmlSnippet("x".repeat(9000) + SAMPLE + "y".repeat(9000)).length, 1000);
+});
+
+test("htmlSnippet no falla amb pàgines curtes o buides", () => {
+  assert.equal(htmlSnippet(""), "");
+  assert.equal(htmlSnippet("curt"), "curt");
 });

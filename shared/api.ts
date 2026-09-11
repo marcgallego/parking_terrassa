@@ -118,6 +118,12 @@ export interface ScrapeError {
   ts: string;
   parking_id: number | null;
   message: string;
+  /**
+   * Tros de la pàgina que no s'ha sabut llegir, per poder diagnosticar-ho.
+   * Només es demana amb `?html=1`; és null si no s'ha demanat o si la pàgina no
+   * es va arribar a descarregar (per exemple, un error HTTP).
+   */
+  html: string | null;
 }
 
 /** `/api/status` */
