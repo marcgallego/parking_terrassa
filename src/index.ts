@@ -3,10 +3,28 @@
  * Cloudflare Worker: captura cada minut (cron), agregat horari, API oberta i dashboard.
  */
 
+import type {
+  DayCount,
+  HeatmapResponse,
+  HourlyRecord,
+  LatestParking,
+  LatestResponse,
+  OccupancyRecord,
+  ParkingInfo,
+  SantRocResponse,
+  Slug,
+  StatusResponse,
+} from "../shared/api";
+
+/** Reexportat perquè el contracte de l'API es pugui importar des del Worker. */
+export type { OccupancyRecord } from "../shared/api";
+
 export interface Env {
   DB: D1Database;
   ASSETS: Fetcher;
   LOCAL_TZ?: string;
+  /** Opcional: URL a la qual notificar que la captura falla (`wrangler secret put ALERT_WEBHOOK`). */
+  ALERT_WEBHOOK?: string;
 }
 
 const USER_AGENT =
@@ -15,6 +33,13 @@ const FETCH_TIMEOUT_MS = 20_000;
 const SPARK_MINUTES = 180;
 const CRON_HOURLY = "7 * * * *";
 const ERROR_RETENTION_DAYS = 30;
+/** Minuts sense cap lectura nova a partir dels quals la captura es considera aturada. */
+const STALE_ALERT_MINUTES = 15;
+/**
+ * Lectures coincidents (de les últimes 24 h) necessàries per acceptar una
+ * capacitat nova a la fitxa del pàrquing. Evita que un minut anòmal la canviï.
+ */
+const CAPACITY_CONFIRM_READINGS = 60;
 
 /**
  * Pàrquings que es capturen. Es defineixen aquí (i no a D1) perquè la captura no
@@ -26,6 +51,8 @@ const PARKINGS: readonly { id: number; url: string; capacity: number }[] = [
   { id: 55, url: "https://www.saba.es/ca/parking-terrassa/parking-saba-ajuntament-mercat", capacity: 237 },
   { id: 53, url: "https://www.saba.es/ca/parking-terrassa/parking-saba-dr.-robert", capacity: 407 },
 ];
+/** Capacitat que el Worker espera de cada pàrquing, per detectar-ne els canvis sense llegir D1. */
+const EXPECTED_CAPACITY = new Map(PARKINGS.map((p) => [p.id, p.capacity]));
 /** Pàrquings a tocar del Portal de Sant Roc: Plaça Vella (54) i Ajuntament-Mercat (55). */
 const SANT_ROC_PARKINGS = [54, 55] as const;
 const SANT_ROC_THRESHOLDS = [10, 25, 50] as const;
@@ -35,20 +62,10 @@ type SantRocThreshold = (typeof SANT_ROC_THRESHOLDS)[number];
 // Tipus de files de D1
 // ---------------------------------------------------------------------------
 
-interface ParkingRow {
-  id: number;
-  slug: string;
-  name: string;
-  url: string;
-  capacity: number;
-  lat: number;
-  lon: number;
-}
-
 interface ReadingRow {
   ts: number;
   parking_id: number;
-  slug: string;
+  slug: Slug;
   capacity: number;
   available: number;
 }
@@ -60,7 +77,7 @@ interface LatestRow extends ReadingRow {
 interface HourlyRow {
   hour_ts: number;
   parking_id: number;
-  slug: string;
+  slug: Slug;
   capacity: number;
   n: number;
   avg_available: number;
@@ -70,7 +87,7 @@ interface HourlyRow {
 
 interface HeatmapRow {
   parking_id: number;
-  slug: string;
+  slug: Slug;
   local_dow: number;
   local_hour: number;
   avg_occupancy_pct: number;
@@ -95,6 +112,13 @@ interface DailySantRocRow {
   below_50: number;
 }
 
+interface CapacityChangeRow {
+  ts: number;
+  parking_id: number;
+  expected: number;
+  observed: number;
+}
+
 interface ErrorRow {
   ts: number;
   parking_id: number | null;
@@ -104,17 +128,6 @@ interface ErrorRow {
 // ---------------------------------------------------------------------------
 // Tipus de sortida de l'API
 // ---------------------------------------------------------------------------
-
-export interface OccupancyRecord {
-  timestamp_utc: string;
-  timestamp_local: string;
-  parking_id: number;
-  parking_slug: string;
-  capacity: number;
-  available: number;
-  occupied: number;
-  occupancy_pct: number;
-}
 
 interface LocalParts {
   local_date: string;
@@ -133,7 +146,7 @@ type ScrapeOutcome =
 
 const DOW_INDEX: Record<string, number> = { Mon: 0, Tue: 1, Wed: 2, Thu: 3, Fri: 4, Sat: 5, Sun: 6 };
 
-function localParts(date: Date, tz: string): LocalParts {
+export function localParts(date: Date, tz: string): LocalParts {
   const fmt = new Intl.DateTimeFormat("en-CA", {
     timeZone: tz,
     year: "numeric",
@@ -154,11 +167,11 @@ function localParts(date: Date, tz: string): LocalParts {
   };
 }
 
-function isoUtc(ts: number): string {
+export function isoUtc(ts: number): string {
   return new Date(ts * 1000).toISOString().replace(".000Z", "Z");
 }
 
-function localIso(ts: number, tz: string): string {
+export function localIso(ts: number, tz: string): string {
   const d = new Date(ts * 1000);
   const p = localParts(d, tz);
   const utcMinutes = d.getUTCHours() * 60 + d.getUTCMinutes();
@@ -229,11 +242,22 @@ async function scrapeAll(env: Env, now = new Date()): Promise<{ ts: number; outc
     "INSERT OR REPLACE INTO readings (ts, parking_id, capacity, available, local_date, local_hour, local_dow) VALUES (?, ?, ?, ?, ?, ?, ?)",
   );
   const err = env.DB.prepare("INSERT INTO scrape_errors (ts, parking_id, message) VALUES (?, ?, ?)");
+  const cap = env.DB.prepare(
+    "INSERT OR IGNORE INTO capacity_changes (parking_id, expected, observed, ts) VALUES (?, ?, ?, ?)",
+  );
   const stmts = outcomes.map((o) =>
     o.error !== undefined
       ? err.bind(ts, o.id, o.error)
       : ins.bind(ts, o.id, o.capacity, o.available, lp.local_date, lp.local_hour, lp.local_dow),
   );
+  // La capacitat publicada pot canviar (places d'abonat, obres). Es compara amb
+  // la constant del Worker, que és a memòria: així la captura continua sense
+  // llegir res de D1.
+  for (const o of outcomes) {
+    if (o.error !== undefined) continue;
+    const expected = EXPECTED_CAPACITY.get(o.id);
+    if (expected !== undefined && expected !== o.capacity) stmts.push(cap.bind(o.id, expected, o.capacity, ts));
+  }
   if (stmts.length) await env.DB.batch(stmts);
   return { ts, outcomes };
 }
@@ -276,6 +300,103 @@ async function aggregateDailySantRoc(env: Env, day: string): Promise<void> {
     .run();
 }
 
+/**
+ * Posa al dia la capacitat de la fitxa dels pàrquings a partir del que s'ha anat
+ * llegint. Sense això, /api/parkings i el denominador del panell del Portal de
+ * Sant Roc es quedarien amb el valor de la migració inicial per sempre.
+ *
+ * Només accepta una capacitat nova si domina clarament les últimes 24 hores, de
+ * manera que un minut amb una xifra estranya no la faci oscil·lar.
+ */
+async function reconcileCapacities(env: Env, now: Date): Promise<number> {
+  const from = Math.floor(now.getTime() / 1000) - 86_400;
+  const [seen, fitxa] = await env.DB.batch<Record<string, unknown>>([
+    env.DB.prepare(
+      `SELECT parking_id, capacity, COUNT(*) AS n FROM readings WHERE ts >= ?1 GROUP BY parking_id, capacity`,
+    ).bind(from),
+    env.DB.prepare("SELECT id, capacity FROM parkings"),
+  ]);
+  const best = new Map<number, { capacity: number; n: number }>();
+  for (const r of (seen?.results ?? []) as unknown as { parking_id: number; capacity: number; n: number }[]) {
+    const cur = best.get(r.parking_id);
+    if (!cur || r.n > cur.n) best.set(r.parking_id, { capacity: r.capacity, n: r.n });
+  }
+  const upd = env.DB.prepare("UPDATE parkings SET capacity = ?1 WHERE id = ?2");
+  const stmts = [];
+  for (const p of (fitxa?.results ?? []) as unknown as { id: number; capacity: number }[]) {
+    const b = best.get(p.id);
+    if (b && b.n >= CAPACITY_CONFIRM_READINGS && b.capacity !== p.capacity) {
+      console.warn(`parking ${p.id}: capacitat de la fitxa ${p.capacity} -> ${b.capacity}`);
+      stmts.push(upd.bind(b.capacity, p.id));
+    }
+  }
+  if (stmts.length) await env.DB.batch(stmts);
+  return stmts.length;
+}
+
+/** Estat de salut de la captura, compartit per /api/status i per l'avís horari. */
+async function checkHealth(env: Env, now: Date): Promise<StatusResponse> {
+  const nowTs = Math.floor(now.getTime() / 1000);
+  const [last, count, errs, caps, fitxa] = await env.DB.batch<Record<string, unknown>>([
+    env.DB.prepare("SELECT MAX(ts) AS ts, MIN(ts) AS first_ts FROM readings"),
+    env.DB.prepare("SELECT COUNT(*) AS n FROM readings"),
+    env.DB.prepare("SELECT ts, parking_id, message FROM scrape_errors ORDER BY ts DESC LIMIT 20"),
+    env.DB.prepare("SELECT ts, parking_id, expected, observed FROM capacity_changes ORDER BY ts DESC LIMIT 20"),
+    env.DB.prepare("SELECT id, capacity FROM parkings"),
+  ]);
+  const l = (last?.results[0] ?? {}) as { ts: number | null; first_ts: number | null };
+  const n = (count?.results[0] as { n: number } | undefined)?.n ?? 0;
+  const recent = (errs?.results ?? []) as unknown as ErrorRow[];
+  const capRows = (caps?.results ?? []) as unknown as CapacityChangeRow[];
+  const staleMinutes = l.ts ? Math.floor((nowTs - l.ts) / 60) : null;
+
+  const issues: string[] = [];
+  if (staleMinutes === null) issues.push("encara no hi ha cap lectura");
+  else if (staleMinutes >= STALE_ALERT_MINUTES) issues.push(`fa ${staleMinutes} minuts que no s'escriu cap lectura`);
+  const lastHourErrors = recent.filter((e) => e.ts >= nowTs - 3600).length;
+  if (lastHourErrors > 0) issues.push(`${lastHourErrors} error(s) de captura a l'última hora`);
+  // Discrepància d'estat, no esdeveniment: es compara la fitxa (ja reconciliada
+  // amb el que s'ha llegit) amb la constant del Worker. L'avís s'apaga tot sol
+  // quan s'actualitza PARKINGS i es torna a desplegar.
+  for (const p of (fitxa?.results ?? []) as unknown as { id: number; capacity: number }[]) {
+    const expected = EXPECTED_CAPACITY.get(p.id);
+    if (expected !== undefined && expected !== p.capacity) {
+      issues.push(`el pàrquing ${p.id} publica ${p.capacity} places i el Worker n'espera ${expected}: actualitzeu PARKINGS`);
+    }
+  }
+
+  return {
+    healthy: issues.length === 0,
+    issues,
+    last_reading_utc: l.ts ? isoUtc(l.ts) : null,
+    first_reading_utc: l.first_ts ? isoUtc(l.first_ts) : null,
+    stale_minutes: staleMinutes,
+    readings: n,
+    recent_errors: recent.map((e) => ({ ...e, ts: isoUtc(e.ts) })),
+    recent_capacity_changes: capRows.map((c) => ({ ...c, ts: isoUtc(c.ts) })),
+  };
+}
+
+/**
+ * Avisa si la captura s'ha aturat o si la capacitat publicada ha canviat.
+ * Només fa res si hi ha el secret `ALERT_WEBHOOK` (Slack, Discord, ntfy...);
+ * sense secret, l'estat es consulta igualment a /api/status.
+ */
+async function sendAlert(env: Env, health: StatusResponse): Promise<void> {
+  if (!env.ALERT_WEBHOOK || health.healthy) return;
+  const text = `parking-terrassa: ${health.issues.join("; ")}`;
+  try {
+    await fetch(env.ALERT_WEBHOOK, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, ...health }),
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+  } catch (e) {
+    console.error("no s'ha pogut enviar l'avís", errorMessage(e));
+  }
+}
+
 /** Feina horària: agregat horari, agregats diaris tancats i neteja d'errors antics. */
 async function hourlyMaintenance(env: Env, now: Date): Promise<void> {
   const tz = env.LOCAL_TZ ?? "Europe/Madrid";
@@ -288,10 +409,15 @@ async function hourlyMaintenance(env: Env, now: Date): Promise<void> {
   } else if (hour === 4) {
     // Un cop al dia: repassem l'última setmana per cobrir dies que haguessin quedat sense agregar.
     for (let n = 2; n <= 7; n++) await aggregateDailySantRoc(env, dayBefore(n));
+    // Els errors caduquen; els canvis de capacitat no, són poques files i
+    // documenten com ha evolucionat l'oferta de places.
     await env.DB.prepare("DELETE FROM scrape_errors WHERE ts < ?1")
       .bind(Math.floor(now.getTime() / 1000) - ERROR_RETENTION_DAYS * 86_400)
       .run();
   }
+  // Cada hora: posa al dia la capacitat de la fitxa i avisa si alguna cosa falla.
+  await reconcileCapacities(env, now);
+  await sendAlert(env, await checkHealth(env, now));
 }
 
 // ---------------------------------------------------------------------------
@@ -301,7 +427,7 @@ async function hourlyMaintenance(env: Env, now: Date): Promise<void> {
 const CSV_HEADER =
   "timestamp_utc,timestamp_local,parking_id,parking_slug,capacity,available,occupied,occupancy_pct\n";
 
-const pct = (capacity: number, available: number): number =>
+export const pct = (capacity: number, available: number): number =>
   Math.round((1000 * (capacity - available)) / capacity) / 10;
 
 function rowToRecord(r: ReadingRow, tz: string): OccupancyRecord {
@@ -317,7 +443,7 @@ function rowToRecord(r: ReadingRow, tz: string): OccupancyRecord {
   };
 }
 
-function toCsv(records: OccupancyRecord[]): string {
+export function toCsv(records: OccupancyRecord[]): string {
   let out = CSV_HEADER;
   for (const x of records) {
     out += `${x.timestamp_utc},${x.timestamp_local},${x.parking_id},${x.parking_slug},${x.capacity},${x.available},${x.occupied},${x.occupancy_pct}\n`;
@@ -396,7 +522,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   const nowTs = Math.floor(Date.now() / 1000);
 
   if (path === "/api/parkings") {
-    const { results } = await env.DB.prepare("SELECT * FROM parkings ORDER BY id").all<ParkingRow>();
+    const { results } = await env.DB.prepare("SELECT * FROM parkings ORDER BY id").all<ParkingInfo>();
     return json(results, { maxAge: 3600 });
   }
 
@@ -416,7 +542,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         e.spark.push([r.ts, r.available]);
       } else byParking.set(r.parking_id, { last: r, spark: [[r.ts, r.available]] });
     }
-    const parkings = [...byParking.values()].map(({ last, spark }) => ({
+    const parkings: LatestParking[] = [...byParking.values()].map(({ last, spark }) => ({
       parking_id: last.parking_id,
       parking_slug: last.slug,
       name: last.name,
@@ -428,27 +554,15 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       occupancy_pct: pct(last.capacity, last.available),
       spark,
     }));
-    return json({ generated_at: isoUtc(nowTs), parkings }, { maxAge: 30 });
+    const payload: LatestResponse = { generated_at: isoUtc(nowTs), parkings };
+    return json(payload, { maxAge: 30 });
   }
 
   if (path === "/api/status") {
-    const [last, count, errs] = await env.DB.batch<Record<string, unknown>>([
-      env.DB.prepare("SELECT MAX(ts) AS ts, MIN(ts) AS first_ts FROM readings"),
-      env.DB.prepare("SELECT COUNT(*) AS n FROM readings"),
-      env.DB.prepare("SELECT ts, parking_id, message FROM scrape_errors ORDER BY ts DESC LIMIT 20"),
-    ]);
-    const l = (last?.results[0] ?? {}) as { ts: number | null; first_ts: number | null };
-    const n = (count?.results[0] as { n: number } | undefined)?.n ?? 0;
-    const recent = (errs?.results ?? []) as unknown as ErrorRow[];
-    return json(
-      {
-        last_reading_utc: l.ts ? isoUtc(l.ts) : null,
-        first_reading_utc: l.first_ts ? isoUtc(l.first_ts) : null,
-        readings: n,
-        recent_errors: recent.map((e) => ({ ...e, ts: isoUtc(e.ts) })),
-      },
-      { maxAge: 30 },
-    );
+    const health = await checkHealth(env, new Date());
+    // 503 quan la captura no va bé: així un monitor extern se n'assabenta sense
+    // haver d'interpretar el cos de la resposta.
+    return json(health, { status: health.healthy ? 200 : 503, maxAge: 30 });
   }
 
   // /api/day/AAAA-MM-DD (json)  |  /data/AAAA-MM-DD.csv
@@ -486,8 +600,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     )
       .bind(nowTs - days * 86_400)
       .all<HourlyRow>();
-    return json(
-      results.map((r) => ({
+    const out: HourlyRecord[] = results.map((r) => ({
         hour_utc: isoUtc(r.hour_ts),
         hour_local: localIso(r.hour_ts, tz),
         parking_id: r.parking_id,
@@ -498,9 +611,8 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         min_available: r.min_available,
         max_available: r.max_available,
         avg_occupancy_pct: pct(r.capacity, r.avg_available),
-      })),
-      { maxAge: 300 },
-    );
+    }));
+    return json(out, { maxAge: 300 });
   }
 
   if (path === "/api/heatmap") {
@@ -516,8 +628,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     )
       .bind(nowTs - weeks * 7 * 86_400)
       .all<HeatmapRow>();
-    return json(
-      {
+    const payload: HeatmapResponse = {
         weeks,
         cells: results.map((r) => ({
           parking_id: r.parking_id,
@@ -527,9 +638,8 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           avg_occupancy_pct: Math.round(r.avg_occupancy_pct * 10) / 10,
           n: r.n,
         })),
-      },
-      { maxAge: 600 },
-    );
+    };
+    return json(payload, { maxAge: 600 });
   }
 
   // /api/santroc?days=30&threshold=25 : places lliures combinades dels pàrquings propers al Portal de Sant Roc
@@ -566,8 +676,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       ...closedRows.map((r) => ({ day: r.day, minutes: r.minutes, min_free: r.min_free, min_ts: r.min_ts, minutes_below: r[belowKey] })),
       ...liveRows,
     ];
-    return json(
-      {
+    const payload: SantRocResponse = {
         parking_ids: [...SANT_ROC_PARKINGS],
         capacity,
         threshold,
@@ -579,16 +688,16 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
           min_at_local: localIso(r.min_ts, tz),
           minutes_below: r.minutes_below,
         })),
-      },
-      { maxAge: 300 },
-    );
+    };
+    return json(payload, { maxAge: 300 });
   }
 
   if (path === "/api/days") {
     const { results } = await env.DB.prepare(
       "SELECT local_date AS day, COUNT(*) AS rows_ FROM readings GROUP BY local_date ORDER BY local_date DESC LIMIT 400",
     ).all<{ day: string; rows_: number }>();
-    return json(results.map((r) => ({ day: r.day, rows: r.rows_ })), { maxAge: 300 });
+    const out: DayCount[] = results.map((r) => ({ day: r.day, rows: r.rows_ }));
+    return json(out, { maxAge: 300 });
   }
 
   return json({ error: "no trobat" }, { status: 404 });

@@ -67,7 +67,7 @@
           {
             "name": "capacity",
             "type": "integer",
-            "description": "Places totals publicades per Saba."
+            "description": "Places totals publicades per Saba en el moment de la captura. No és constant: pot canviar (places reservades a abonats, obres), per això es desa a cada fila en lloc de només a la fitxa del pàrquing."
           },
           {
             "name": "available",
