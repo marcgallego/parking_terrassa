@@ -130,7 +130,13 @@ export interface StatusResponse {
   first_reading_utc: string | null;
   /** minuts des de l'última lectura escrita, o null si no n'hi ha cap */
   stale_minutes: number | null;
-  readings: number;
+  /** lectures escrites avui (hora local). Consulta indexada, acotada a un sol dia. */
+  readings_today: number;
+  /**
+   * Total de files de `readings`. Només es calcula si es demana amb `?totals=1`,
+   * perquè obliga a recórrer tota la taula; altrament és null.
+   */
+  readings: number | null;
   recent_errors: ScrapeError[];
   /** canvis de capacitat dels últims 30 dies, els més recents primer */
   recent_capacity_changes: CapacityChange[];

@@ -334,18 +334,39 @@ async function reconcileCapacities(env: Env, now: Date): Promise<number> {
   return stmts.length;
 }
 
-/** Estat de salut de la captura, compartit per /api/status i per l'avís horari. */
-async function checkHealth(env: Env, now: Date): Promise<StatusResponse> {
+/**
+ * Estat de salut de la captura, compartit per /api/status i per l'avís horari.
+ *
+ * Es consulta cada hora dues vegades (el cron i la feina de GitHub Actions), i
+ * D1 factura files llegides, així que totes les consultes han d'estar acotades.
+ * Dos detalls que ho fan possible i que és fàcil desfer sense adonar-se'n:
+ *
+ * - `MAX(ts)` i `MIN(ts)` van en consultes separades. Juntes a la mateixa
+ *   consulta, SQLite no pot fer servir l'índex i recorre tota la taula
+ *   (`EXPLAIN QUERY PLAN` passa de SEARCH a SCAN).
+ * - El total de files només es calcula si `totals` és cert, perquè és l'única
+ *   consulta que no es pot acotar. Per al dia a dia hi ha `readings_today`, que
+ *   va per `idx_readings_local_date`.
+ */
+async function checkHealth(env: Env, now: Date, totals = false): Promise<StatusResponse> {
   const nowTs = Math.floor(now.getTime() / 1000);
-  const [last, count, errs, caps, fitxa] = await env.DB.batch<Record<string, unknown>>([
-    env.DB.prepare("SELECT MAX(ts) AS ts, MIN(ts) AS first_ts FROM readings"),
-    env.DB.prepare("SELECT COUNT(*) AS n FROM readings"),
+  const today = localParts(now, env.LOCAL_TZ ?? "Europe/Madrid").local_date;
+  const stmts = [
+    env.DB.prepare("SELECT MAX(ts) AS ts FROM readings"),
+    env.DB.prepare("SELECT MIN(ts) AS ts FROM readings"),
+    env.DB.prepare("SELECT COUNT(*) AS n FROM readings WHERE local_date = ?1").bind(today),
     env.DB.prepare("SELECT ts, parking_id, message FROM scrape_errors ORDER BY ts DESC LIMIT 20"),
     env.DB.prepare("SELECT ts, parking_id, expected, observed FROM capacity_changes ORDER BY ts DESC LIMIT 20"),
     env.DB.prepare("SELECT id, capacity FROM parkings"),
-  ]);
-  const l = (last?.results[0] ?? {}) as { ts: number | null; first_ts: number | null };
-  const n = (count?.results[0] as { n: number } | undefined)?.n ?? 0;
+  ];
+  if (totals) stmts.push(env.DB.prepare("SELECT COUNT(*) AS n FROM readings"));
+  const [lastR, firstR, todayR, errs, caps, fitxa, totalR] = await env.DB.batch<Record<string, unknown>>(stmts);
+  const l = {
+    ts: (lastR?.results[0] as { ts: number | null } | undefined)?.ts ?? null,
+    first_ts: (firstR?.results[0] as { ts: number | null } | undefined)?.ts ?? null,
+  };
+  const nToday = (todayR?.results[0] as { n: number } | undefined)?.n ?? 0;
+  const n = totals ? ((totalR?.results[0] as { n: number } | undefined)?.n ?? 0) : null;
   const recent = (errs?.results ?? []) as unknown as ErrorRow[];
   const capRows = (caps?.results ?? []) as unknown as CapacityChangeRow[];
   const staleMinutes = l.ts ? Math.floor((nowTs - l.ts) / 60) : null;
@@ -371,6 +392,7 @@ async function checkHealth(env: Env, now: Date): Promise<StatusResponse> {
     last_reading_utc: l.ts ? isoUtc(l.ts) : null,
     first_reading_utc: l.first_ts ? isoUtc(l.first_ts) : null,
     stale_minutes: staleMinutes,
+    readings_today: nToday,
     readings: n,
     recent_errors: recent.map((e) => ({ ...e, ts: isoUtc(e.ts) })),
     recent_capacity_changes: capRows.map((c) => ({ ...c, ts: isoUtc(c.ts) })),
@@ -559,7 +581,8 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   }
 
   if (path === "/api/status") {
-    const health = await checkHealth(env, new Date());
+    // El total de files només si es demana: recórrer tota la taula surt car.
+    const health = await checkHealth(env, new Date(), url.searchParams.get("totals") === "1");
     // 503 quan la captura no va bé: així un monitor extern se n'assabenta sense
     // haver d'interpretar el cos de la resposta.
     return json(health, { status: health.healthy ? 200 : 503, maxAge: 30 });
