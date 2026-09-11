@@ -1,0 +1,35 @@
+# Vigila que la captura segueixi viva. /api/status respon 503 si fa massa estona
+# que no s'escriu cap lectura, si hi ha errors de captura recents o si la
+# capacitat publicada per saba.es ha canviat. Si falla, GitHub envia un avís.
+name: Salut de la captura
+
+on:
+  schedule:
+    - cron: "5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Consulta /api/status
+        env:
+          STATUS_URL: https://parking.terrassa.workers.dev/api/status
+        run: |
+          set -uo pipefail
+          code=$(curl -sS --retry 2 --max-time 30 -o status.json -w "%{http_code}" "$STATUS_URL") || {
+            echo "::error::no s'ha pogut consultar /api/status"
+            exit 1
+          }
+          echo "HTTP $code"
+          cat status.json
+          echo
+          if [ "$code" = "200" ]; then
+            echo "la captura va bé"
+            exit 0
+          fi
+          jq -r '.issues[]? // empty' status.json | while IFS= read -r issue; do
+            echo "::error::$issue"
+          done
+          echo "::error::/api/status ha respost $code"
+          exit 1

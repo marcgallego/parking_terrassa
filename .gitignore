@@ -7,3 +7,4 @@ __pycache__/
 .DS_Store
 public/app.js
 public/app.js.map
+.test-build/

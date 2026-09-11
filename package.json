@@ -7,12 +7,13 @@
   "scripts": {
     "build": "esbuild web/app.ts --bundle --format=iife --target=es2020 --sourcemap --outfile=public/app.js",
     "typecheck": "tsc -b tsconfig.worker.json tsconfig.web.json",
-    "check": "npm run typecheck && npm run build",
+    "check": "npm run typecheck && npm run test && npm run build",
     "dev": "npm run build && wrangler dev --test-scheduled",
     "deploy": "npm run check && wrangler deploy",
     "db:migrate:local": "wrangler d1 migrations apply parking-terrassa --local",
     "db:migrate": "wrangler d1 migrations apply parking-terrassa --remote",
-    "tail": "wrangler tail"
+    "tail": "wrangler tail",
+    "test": "esbuild test/*.test.ts --bundle --platform=node --format=esm --packages=external --outdir=.test-build --log-level=warning && node --test .test-build/*.test.js"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260910.1",

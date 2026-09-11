@@ -24,9 +24,11 @@ HTTP /               ─► Assets estàtics: dashboard (public/)
 Tot el codi és TypeScript en mode estricte.
 
 - `src/index.ts`: Worker (captura, agregat, API). Wrangler el compila directament.
-- `web/app.ts`, `web/api.ts`: dashboard sense dependències (tiles d'estat, gràfic de línies, patró setmanal, descàrregues) i tipus de l'API. `esbuild` el compila a `public/app.js`.
+- `shared/api.ts`: contracte de l'API. L'importen tant el Worker (que el produeix) com el dashboard (que el consumeix), de manera que canviar un camp trenca la compilació en lloc del dashboard en execució.
+- `web/app.ts`, `web/api.ts`: dashboard sense dependències (tiles d'estat, gràfic de línies, patró setmanal, descàrregues). `esbuild` el compila a `public/app.js`.
 - `public/`: HTML, CSS i `datapackage.json`, servits com a assets estàtics.
 - `migrations/`: esquema D1.
+- `test/`: proves del Worker amb el runner de Node (`node --test`), sense cap dependència afegida.
 - `local-scraper/`: versió Python autònoma per a qui vulgui capturar en una màquina pròpia.
 
 ## Per què: el Portal de Sant Roc
@@ -63,7 +65,7 @@ Endpoints (CORS obert):
 | `/api/santroc?days=30&threshold=25` | per dia: mínim de places lliures sumant Ajuntament-Mercat i Plaça Vella, hora del mínim i minuts sota el llindar (10, 25 o 50) |
 | `/api/parkings` | fitxa dels pàrquings |
 | `/api/days` | dies amb dades |
-| `/api/status` | última lectura, nombre de files, errors recents |
+| `/api/status` | estat de la captura: `healthy`, `issues`, minuts des de l'última lectura, errors recents i canvis de capacitat. Respon **503** si la captura no va bé |
 | `/datapackage.json` | descripció del dataset (Frictionless Data Package) |
 
 Si una captura falla per a un pàrquing, aquell minut no hi ha fila; l'error queda registrat i és visible a `/api/status`.
@@ -91,6 +93,8 @@ Consum aproximat en el pla gratuït: 1.440 invocacions de cron i 4.320 files esc
 - **Validació**: només s'escriu una fila si la pàgina conté el bloc d'ocupació amb dos enters, la capacitat és versemblant i les places lliures no superen la capacitat. Si no, es registra un error i el minut queda buit, mai amb un valor inventat.
 - **Consultes acotades**: els gràfics de setmanes i mesos llegeixen la taula `hourly`; el panell del Portal de Sant Roc llegeix `daily_santroc` (una fila per dia) i només calcula en viu el dia d'avui.
 - **Còpia fora de Cloudflare**: cada matinada una GitHub Action baixa el CSV del dia anterior i el desa a la branca [`data`](https://github.com/marcgallego/parking_terrassa/tree/data) d'aquest repositori. A més, D1 conserva 30 dies d'historial (Time Travel) per restaurar la base de dades a qualsevol instant amb `wrangler d1 time-travel restore`.
+- **La capacitat no es dóna per fixa**: les places totals d'un pàrquing poden canviar (places reservades a abonats, una planta tancada per obres). Cada lectura desa la capacitat que saba.es publicava en aquell moment, de manera que el CSV sempre és fidel. A més, cada hora es reconcilia la fitxa de `parkings` amb la capacitat dominant de les últimes 24 h —cal que hi hagi almenys 60 lectures coincidents, per no oscil·lar amb un minut estrany—, i així `/api/parkings` i el denominador del panell del Portal de Sant Roc no es queden congelats. Cada transició distinta deixa una fila a `capacity_changes`, i `/api/status` avisa mentre la constant `PARKINGS` del Worker no coincideixi amb el que s'està llegint.
+- **Vigilància**: `/api/status` respon 503 si fa 15 minuts o més que no s'escriu cap lectura, si hi ha errors de captura a l'última hora o si la capacitat publicada no coincideix amb la que el Worker espera. La feina `Salut de la captura` de GitHub Actions ho consulta cada hora i falla (i per tant avisa) si alguna cosa no va bé. Opcionalment, amb `npx wrangler secret put ALERT_WEBHOOK` el Worker envia també un POST amb l'estat a l'URL que li indiqueu (Slack, Discord, ntfy...).
 - **Migracions**: només afegeixen taules (`CREATE TABLE IF NOT EXISTS`); cap no esborra ni modifica dades. Cal aplicar-les a mà amb `npm run db:migrate` abans de desplegar codi que les necessiti.
 - **Mida**: unes 4.320 files al dia, uns 150 MB l'any. El límit d'una base D1 al pla gratuït és de 500 MB, així que hi ha marge per a uns tres anys; després caldria arxivar anys sencers o passar al pla de pagament.
 
@@ -100,12 +104,24 @@ Consum aproximat en el pla gratuït: 1.440 invocacions de cron i 4.320 files esc
 npm run db:migrate:local
 npm run dev                                          # compila web/ i arrenca http://localhost:8787
 npm run typecheck                                    # comprova tipus de Worker i web
+npm test                                             # proves del Worker (node --test)
+npm run check                                        # typecheck + proves + build, el mateix que fa la CI
 npm run build                                        # només compila web/app.ts -> public/app.js
 curl "http://localhost:8787/__scheduled?cron=*+*+*+*+*"   # dispara una captura
 curl "http://localhost:8787/__scheduled?cron=7+*+*+*+*"   # dispara l'agregat horari
 ```
 
 El dashboard admet `?range=today|7|30`, `?weeks=4|8|26`, `?srdays=30|90|365`, `?threshold=10|25|50` i `?theme=light|dark` a l'URL.
+
+## Proves i integració contínua
+
+Les proves cobreixen les parts pures del Worker i no necessiten ni D1 ni xarxa: `esbuild` compila `test/*.test.ts` i les executa el runner que ja porta Node, sense cap dependència nova.
+
+- `test/parse.test.ts`: el punt on el projecte depèn del format de saba.es, inclosos els casos que han de fallar (bloc absent, pàgina redissenyada, xifres inversemblants).
+- `test/time.test.ts`: hora local i horari d'estiu, incloent-hi l'hora que no existeix al març i la que es repeteix a l'octubre. Un error aquí desplaçaria `local_date`/`local_hour` sense fer fallar res.
+- `test/csv.test.ts`: la capçalera i l'ordre de les columnes del CSV, que són el contracte públic del dataset.
+
+A cada push, la CI fa `npm run check` (tipus, proves i build), executa les proves del scraper de Python i comprova que cap migració no faci operacions destructives.
 
 ## Llicència
 

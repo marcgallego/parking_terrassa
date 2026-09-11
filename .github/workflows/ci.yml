@@ -1,0 +1,48 @@
+# Comprovacions del codi: tipus, proves i compilació del dashboard.
+name: CI
+
+on:
+  push:
+    branches-ignore: [data]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      # typecheck (Worker + dashboard) -> proves -> build
+      - run: npm run check
+
+      - name: Comprova que les migracions només afegeixen coses
+        run: |
+          set -euo pipefail
+          # Cap migració no ha d'esborrar ni modificar dades ja capturades.
+          if grep -rniE '^[[:space:]]*(DROP|DELETE|TRUNCATE|UPDATE)[[:space:]]' migrations/; then
+            echo "::error::una migració fa una operació destructiva; reviseu-la"
+            exit 1
+          fi
+          echo "migracions només additives"
+
+  scraper:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # El scraper autònom només fa servir la biblioteca estàndard.
+      - name: Proves del scraper de Python
+        working-directory: local-scraper
+        run: python -m unittest discover -s tests -v

@@ -4,9 +4,9 @@
     "composite": true,
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "types": [],
-    "rootDir": "web",
+    "rootDir": ".",
     "tsBuildInfoFile": ".wrangler/tsbuildinfo.web"
   },
   "files": [],
-  "include": ["web/**/*.ts"]
+  "include": ["web/**/*.ts", "shared/**/*.ts"]
 }

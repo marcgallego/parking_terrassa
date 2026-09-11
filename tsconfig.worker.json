@@ -4,9 +4,9 @@
     "composite": true,
     "lib": ["ES2022"],
     "types": ["@cloudflare/workers-types"],
-    "rootDir": "src",
+    "rootDir": ".",
     "tsBuildInfoFile": ".wrangler/tsbuildinfo.worker"
   },
   "files": [],
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "shared/**/*.ts"]
 }
