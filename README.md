@@ -84,7 +84,11 @@ npm run deploy                                      # typecheck + build + public
 
 Al cap d'un minut, `https://parking.<subdomini>.workers.dev/api/status` ha de mostrar la primera lectura. Per veure els logs en directe: `npm run tail`.
 
-Consum aproximat en el pla gratuït: 1.440 invocacions de cron i 4.320 files escrites al dia (límits: 100.000 peticions i 100.000 files escrites). Cada visita al dashboard llegeix unes 10.000 files de D1 (límit 5 milions/dia); les respostes de dies tancats es guarden a la cache de Cloudflare.
+Consum aproximat en el pla gratuït: 1.440 invocacions de cron i 4.320 files escrites al dia (límits: 100.000 peticions i 100.000 files escrites).
+
+El límit que costa més de respectar és el de lectures: 5 milions de files al dia, i compta per compte, no per base de dades. La despesa del dashboard està desacoblada de les visites: les respostes de dies tancats es guarden un dia a la cache de la vora i les del dia en curs, un minut, de manera que `/api/day/...` llegeix de D1 un cop per minut i no un cop per visitant. El llistat de dies (`/api/days`) es compta des de `hourly`, unes seixanta vegades més petita que `readings`. La cache és per centre de dades, així que amb visites repartides l'estalvi és gran però no exacte.
+
+Si tot i així s'esgotessin les lectures, la captura continuaria: només escriu. El que s'aturaria fins a mitjanit UTC és el dashboard, l'API i l'agregat horari.
 
 ## Integritat de les dades
 
