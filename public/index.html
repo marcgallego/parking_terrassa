@@ -1,122 +1,113 @@
 <!doctype html>
 <html lang="ca">
+
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Pàrquings Saba de Terrassa</title>
-<meta name="description" content="Dataset obert d'ocupació minut a minut dels pàrquings Saba de Terrassa: Plaça Vella, Ajuntament-Mercat i Dr. Robert.">
-<link rel="stylesheet" href="/style.css">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='18' fill='%232a78d6'/><text x='50' y='72' font-size='64' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='white'>P</text></svg>">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cal un altre pàrquing al centre de Terrassa?</title>
+  <meta name="description"
+    content="Cal un altre pàrquing al centre de Terrassa? Places lliures dels pàrquings Ajuntament-Mercat i Plaça Vella, a tocar del Portal de Sant Roc, minut a minut.">
+  <link rel="stylesheet" href="/build/style.css">
+  <link rel="icon"
+    href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='18' fill='%232a78d6'/><text x='50' y='72' font-size='64' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='white'>P</text></svg>">
+  <script type="module" src="/build/santroc.js"></script>
 </head>
+
 <body>
-<header class="top">
-  <div>
-    <h1>Pàrquings Saba de Terrassa</h1>
-    <p class="sub">Ocupació minut a minut. Dades obertes, capturades de <a href="https://www.saba.es/ca/parking-terrassa" rel="noopener">saba.es</a>.</p>
-  </div>
-  <p class="status" id="status"><span class="dot" aria-hidden="true"></span><span id="status-text">Carregant…</span></p>
-</header>
-
-<main>
-  <section class="kpi" id="kpi" aria-label="Estat actual"></section>
-
-  <section class="card focus" id="santroc" aria-labelledby="sr-title">
-    <div class="card-head">
-      <div>
-        <h2 id="sr-title">Portal de Sant Roc: hi ha lloc a prop?</h2>
-        <p class="hint">Places lliures sumades dels dos pàrquings a tocar del Portal de Sant Roc, Ajuntament-Mercat i Plaça Vella. Si al pitjor moment de cada dia encara en queden, l'oferta actual absorbeix la demanda.</p>
-      </div>
-      <div class="filters-2">
-        <div class="filters" role="group" aria-label="Període"><button class="chip is-on" data-sr-days="30">30 dies</button><button class="chip" data-sr-days="90">90 dies</button><button class="chip" data-sr-days="365">1 any</button></div>
-        <div class="filters" role="group" aria-label="Llindar de places lliures"><span class="flabel">llindar</span><button class="chip" data-sr-threshold="10">10</button><button class="chip is-on" data-sr-threshold="25">25</button><button class="chip" data-sr-threshold="50">50 lliures</button></div>
-      </div>
+  <header class="top">
+    <div>
+      <h1 class="title"><span class="logo" aria-hidden="true">P</span>Cal un altre pàrquing al centre de Terrassa?</h1>
+      <p class="sub">Anàlisi en temps real de les places lliures dels dos pàrquings Saba a tocar del Portal de Sant Roc:
+        Ajuntament-Mercat i Plaça Vella, tots dos a 4 minuts a peu del Portal.</p>
+      <p class="sub">Com a alternativa al pàrquing, existeix la iniciativa <a
+          href="https://adenc.cat/convoquem-una-concentracio-per-reivindicar-un-bosc-urba-al-portal-de-sant-roc-de-terrassa/"
+          rel="noopener">«Volem un bosc urbà»</a>, que proposa transformar l'espai en un refugi climàtic. Segons els
+        seus impulsors, ajudaria a reduir la temperatura fins a 10 °C a l'estiu i la sensació tèrmica fins a 20 °C.
+      </p>
     </div>
-    <div class="stats" id="sr-stats"></div>
-    <h3>Avui, minut a minut</h3>
-    <div class="chart" id="sr-today"></div>
-    <h3>Mínim diari de places lliures</h3>
-    <p class="hint" id="sr-daily-hint"></p>
-    <div class="chart" id="sr-daily"></div>
-    <details class="tbl"><summary>Veure com a taula</summary><div class="tbl-wrap" id="sr-table"></div></details>
-  </section>
+    <p class="status" id="status"><span class="dot" aria-hidden="true"></span><span id="status-text">Carregant…</span>
+    </p>
+  </header>
 
-  <section class="card">
-    <div class="card-head">
-      <h2>Ocupació</h2>
-      <div class="filters" role="group" aria-label="Interval">
-        <button class="chip is-on" data-range="today">Avui</button>
-        <button class="chip" data-range="7">7 dies</button>
-        <button class="chip" data-range="30">30 dies</button>
-      </div>
+  <main>
+    <div class="toolbar">
+      <div class="filters" role="group" aria-label="Període"><span class="flabel">període</span><button class="chip"
+          data-srdays="30">30 dies</button><button class="chip" data-srdays="90">90 dies</button><button class="chip"
+          data-srdays="365">1 any</button></div>
+      <div class="filters" role="group" aria-label="Llindar de places lliures"><span
+          class="flabel">llindar</span><button class="chip" data-threshold="10">10</button><button class="chip"
+          data-threshold="25">25</button><button class="chip" data-threshold="50">50 lliures</button></div>
     </div>
-    <div class="legend" id="line-legend"></div>
-    <div class="chart" id="line-chart"></div>
-    <details class="tbl"><summary>Veure com a taula</summary><div class="tbl-wrap" id="line-table"></div></details>
-  </section>
 
-  <section class="card">
-    <div class="card-head">
-      <h2>Patró setmanal</h2>
-      <div class="filters" role="group" aria-label="Setmanes">
-        <button class="chip" data-weeks="4">4 setmanes</button>
-        <button class="chip is-on" data-weeks="8">8 setmanes</button>
-        <button class="chip" data-weeks="26">26 setmanes</button>
+    <section class="stats" id="sr-stats" aria-label="Resum"></section>
+
+    <section class="card">
+      <div class="card-head">
+        <div>
+          <h2>Avui, minut a minut</h2>
+          <p class="hint">Places lliures entre tots dos pàrquings i de cadascun. La línia vermella és el llindar, i es
+            compara amb el total.</p>
+        </div>
       </div>
-    </div>
-    <p class="hint">Ocupació mitjana per dia de la setmana i hora local. Com més fosc, més ple.</p>
-    <div id="heatmaps"></div>
-    <div class="ramp" aria-hidden="true"><span>0 %</span><i></i><span>100 %</span></div>
-    <details class="tbl"><summary>Veure com a taula</summary><div class="tbl-wrap" id="heat-table"></div></details>
-  </section>
+      <div class="legend-static"><span><i class="is-total"
+            style="background:var(--text-primary)"></i>Total</span><span><i style="background:var(--series-1)"></i>Plaça
+          Vella</span><span><i style="background:var(--series-2)"></i>Ajuntament-Mercat</span></div>
+      <div class="chart" id="sr-today"></div>
+      <p class="hint zoom-hint">Arrossega sobre el gràfic per ampliar un tram; doble clic per tornar a la vista sencera.
+      </p>
+    </section>
 
-  <section class="card" id="data">
-    <div class="card-head"><h2>Dades obertes</h2></div>
-    <p>Una fila per pàrquing i minut. Fitxers CSV amb capçalera, UTF-8, separats per comes. Llicència <a href="https://creativecommons.org/licenses/by/4.0/deed.ca" rel="license">CC BY 4.0</a>; font original Saba Infraestructures.</p>
-    <div class="dl-grid">
-      <div>
-        <h3>Descàrregues</h3>
-        <ul class="links" id="downloads"></ul>
-        <p class="hint">Per dies: <code>/data/AAAA-MM-DD.csv</code> · per mesos: <code>/data/AAAA-MM.csv</code></p>
+    <section class="card">
+      <div class="card-head">
+        <div>
+          <h2>Mínim diari de places lliures</h2>
+          <p class="hint" id="sr-daily-hint"></p>
+        </div>
       </div>
-      <div>
-        <h3>API (JSON, CORS obert)</h3>
-        <ul class="links">
-          <li><a href="/api/latest"><code>/api/latest</code></a> última lectura de cada pàrquing</li>
-          <li><a href="/api/day/" id="api-today"><code>/api/day/AAAA-MM-DD</code></a> lectures d'un dia</li>
-          <li><a href="/api/hourly?days=7"><code>/api/hourly?days=7</code></a> agregat horari (fins a 92 dies)</li>
-          <li><a href="/api/heatmap?weeks=8"><code>/api/heatmap?weeks=8</code></a> mitjana per dia de la setmana i hora</li>
-          <li><a href="/api/santroc?days=30&amp;threshold=25"><code>/api/santroc?days=30&amp;threshold=25</code></a> mínim diari de places lliures a prop del Portal de Sant Roc</li>
-          <li><a href="/api/parkings"><code>/api/parkings</code></a> fitxa dels pàrquings</li>
-          <li><a href="/api/days"><code>/api/days</code></a> dies amb dades</li>
-          <li><a href="/api/status"><code>/api/status</code></a> estat de la captura</li>
-          <li><a href="/datapackage.json"><code>/datapackage.json</code></a> descripció del dataset (Frictionless)</li>
-        </ul>
-      </div>
-    </div>
-    <h3>Columnes</h3>
-    <div class="tbl-wrap">
-    <table class="schema">
-      <thead><tr><th>columna</th><th>descripció</th></tr></thead>
-      <tbody>
-        <tr><td><code>timestamp_utc</code></td><td>instant de la captura en UTC, truncat al minut</td></tr>
-        <tr><td><code>timestamp_local</code></td><td>el mateix instant en hora local (Europe/Madrid), ISO 8601</td></tr>
-        <tr><td><code>parking_id</code></td><td>identificador del pàrquing a saba.es (53, 54, 55)</td></tr>
-        <tr><td><code>parking_slug</code></td><td><code>placa-vella</code>, <code>ajuntament-mercat</code>, <code>dr-robert</code></td></tr>
-        <tr><td><code>capacity</code></td><td>places totals publicades</td></tr>
-        <tr><td><code>available</code></td><td>places lliures</td></tr>
-        <tr><td><code>occupied</code></td><td>capacity − available</td></tr>
-        <tr><td><code>occupancy_pct</code></td><td>100 · occupied / capacity, una decimal</td></tr>
-      </tbody>
-    </table>
-    </div>
-  </section>
-</main>
+      <div class="chart" id="sr-daily"></div>
+      <details class="tbl">
+        <summary>Veure com a taula</summary>
+        <div class="tbl-wrap" id="sr-table"></div>
+      </details>
+    </section>
 
-<footer>
-  <p>Codi font a <a href="https://github.com/marcgallego/parking_terrassa" rel="noopener">github.com/marcgallego/parking_terrassa</a>. Projecte independent, sense relació amb Saba. Si una captura falla, aquell minut no hi és; els errors es poden consultar a <a href="/api/status">/api/status</a>.</p>
-</footer>
+    <section class="card prose">
+      <h2>Com llegir-ho?</h2>
+      <p>Els dos pàrquings analitzats estan operats per Saba i situats a 4 minuts a peu del Portal de Sant Roc. Són els
+        d'Ajuntament-Mercat i Plaça Vella, probablement els més cèntrics de la ciutat. Si quasi sempre hi ha places
+        lliures entre tots dos, l'oferta actual absorbeix la demanda. I és una estimació prudent, perquè no compta la
+        resta d'aparcaments del centre.</p>
+      <p>Cal tenir en compte el següent:</p>
+      <ul>
+        <li>Al centre de la ciutat existeixen un total de 12 aparcaments i força places de zona blava. Malauradament, no
+          hi ha un catàleg de dades obertes amb informació d'ocupació de cap aparcament de la ciutat ni de la zona blava.
+          Animo l'Ajuntament de Terrassa a publicar aquestes dades en obert.</li>
+        <li>Les dades s'obtenen llegint cada minut les places disponibles que publica el web de Saba. Saba tampoc ofereix
+          una API pública ni dades obertes, de manera que faig «scraping».</li>
+        <li>Molt a prop del Portal de Sant Roc hi ha el pàrquing de la plaça del Progrés, amb 303 places de cotxe, operat
+          per la societat municipal Egarvia. Caldria tenir-lo en compte en aquesta anàlisi.</li>
+        <li>Saba opera un tercer pàrquing a Terrassa, el de Dr. Robert, que no està inclòs en aquesta anàlisi perquè ja
+          queda més lluny del Portal de Sant Roc.</li>
+        <li>Les «places disponibles» que publica Saba segurament només compten les de rotació, no les d'abonats.</li>
+        <li>L'ocupació mesura l'oferta, sense tenir en compte factors com el preu del pàrquing.</li>
+      </ul>
+    </section>
 
-<div class="tip" id="tip" role="tooltip" hidden></div>
-<script src="/app.js"></script>
+    <a class="callout" href="/saba">
+      <span><b>Pàrquings Saba de Terrassa</b>Anàlisi de l'ocupació de cada pàrquing (Plaça Vella, Ajuntament-Mercat i
+        Dr. Robert), tendència setmanal i accés a les dades en obert.</span>
+      <span class="arrow" aria-hidden="true">→</span>
+    </a>
+  </main>
+
+  <footer>
+    <nav class="footer-nav" aria-label="Enllaços">
+      <a href="/saba#data">Dades obertes</a>
+      <a href="https://github.com/marcgallego/parking_terrassa" rel="noopener">Codi font</a>
+    </nav>
+    <p>Fet per <a href="https://github.com/marcgallego" rel="author noopener">Marc Gállego Asín</a>. Projecte
+      independent, sense relació amb Saba.</p>
+  </footer>
 </body>
+
 </html>

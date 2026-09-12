@@ -5,7 +5,7 @@
   "description": "Dataset obert d'ocupació dels pàrquings Saba de Terrassa (Cloudflare Workers + D1)",
   "type": "module",
   "scripts": {
-    "build": "esbuild web/app.ts --bundle --format=iife --target=es2020 --sourcemap --outfile=public/app.js",
+    "build": "rm -rf public/build && esbuild web/saba.ts web/santroc.ts web/style.css --bundle --format=esm --splitting --target=es2020 --minify --sourcemap --outdir=public/build --chunk-names=chunks/[name]-[hash] --log-level=warning",
     "typecheck": "tsc -b tsconfig.worker.json tsconfig.web.json",
     "check": "npm run typecheck && npm run test && npm run build",
     "dev": "npm run build && wrangler dev --test-scheduled",
@@ -13,12 +13,16 @@
     "db:migrate:local": "wrangler d1 migrations apply parking-terrassa --local",
     "db:migrate": "wrangler d1 migrations apply parking-terrassa --remote",
     "tail": "wrangler tail",
-    "test": "esbuild test/*.test.ts --bundle --platform=node --format=esm --packages=external --outdir=.test-build --log-level=warning && node --test .test-build/*.test.js"
+    "test": "esbuild test/*.test.ts --bundle --platform=node --format=esm --packages=external --outdir=.test-build --log-level=warning && node --test .test-build/*.test.js",
+    "dev:prod": "npm run build && node scripts/preview-prod.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260910.1",
     "esbuild": "^0.28.2",
     "typescript": "^7.0.2",
     "wrangler": "^4.131.0"
+  },
+  "dependencies": {
+    "uplot": "^1.6.32"
   }
 }
