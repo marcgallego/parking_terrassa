@@ -42,6 +42,14 @@ const STALE_ALERT_MINUTES = 15;
  * capacitat nova a la fitxa del pàrquing. Evita que un minut anòmal la canviï.
  */
 const CAPACITY_CONFIRM_READINGS = 60;
+/** Hores que es reagrupen a cada execució horària. */
+const HOURLY_WINDOW_HOURS = 3;
+/**
+ * Hores que es reagrupen un cop al dia, per tapar els forats que hagi deixat
+ * qualsevol aturada de menys de dos dies. És la consulta més cara del
+ * manteniment (llegeix dos dies de lectures), i per això va un cop al dia.
+ */
+const HOURLY_CATCHUP_HOURS = 48;
 
 /**
  * Pàrquings que es capturen. Es defineixen aquí (i no a D1) perquè la captura no
@@ -280,9 +288,20 @@ async function scrapeAll(env: Env, now = new Date()): Promise<{ ts: number; outc
   return { ts, outcomes };
 }
 
-async function aggregateHourly(env: Env, now = new Date()): Promise<void> {
+/**
+ * Recalcula l'agregat horari de les últimes `hours` hores tancades.
+ *
+ * La finestra normal és curta (HOURLY_WINDOW_HOURS) perquè es fa cada hora. Una
+ * finestra curta, però, no recupera res: si les lectures no es poden llegir
+ * durant unes hores —per exemple perquè s'ha esgotat la quota diària de D1—,
+ * aquelles hores no s'agreguen mai i queda un forat permanent a `hourly`, que
+ * és d'on surten el mapa de calor, els gràfics de setmanes i mesos i el
+ * llistat de dies. Per això un cop al dia es repassa una finestra ampla
+ * (HOURLY_CATCHUP_HOURS) i el forat es tapa tot sol.
+ */
+async function aggregateHourly(env: Env, now = new Date(), hours = HOURLY_WINDOW_HOURS): Promise<void> {
   const currentHour = Math.floor(now.getTime() / 3_600_000) * 3600;
-  const from = currentHour - 3 * 3600; // reagrupem les 3 últimes hores tancades
+  const from = currentHour - hours * 3600;
   await env.DB.prepare(
     `INSERT OR REPLACE INTO hourly
        (hour_ts, parking_id, local_date, local_hour, local_dow, n, capacity, avg_available, min_available, max_available)
@@ -459,6 +478,9 @@ async function hourlyMaintenance(env: Env, now: Date): Promise<void> {
   } else if (hour === 4) {
     // Un cop al dia: repassem l'última setmana per cobrir dies que haguessin quedat sense agregar.
     for (let n = 2; n <= 7; n++) await aggregateDailySantRoc(env, dayBefore(n));
+    // I una finestra ampla de l'agregat horari, que recupera les hores que
+    // haguessin quedat sense agregar (una aturada de lectures, un cron perdut).
+    await aggregateHourly(env, now, HOURLY_CATCHUP_HOURS);
     // Els errors caduquen; els canvis de capacitat no, són poques files i
     // documenten com ha evolucionat l'oferta de places.
     await env.DB.prepare("DELETE FROM scrape_errors WHERE ts < ?1")
@@ -540,10 +562,25 @@ async function queryReadings(env: Env, where: string, binds: (string | number)[]
   return results;
 }
 
-/** Cache a la vora (edge) per no repetir lectures a D1 per a dades tancades. */
-async function withCache(request: Request, maxAge: number, producer: () => Promise<Response>): Promise<Response> {
+/**
+ * Cache a la vora (edge) per no repetir lectures a D1.
+ *
+ * La clau es construeix amb `canonical` —la ruta amb els paràmetres ja
+ * normalitzats i acotats— i no amb l'URL tal com ha arribat. Així, afegir-hi
+ * paràmetres que el Worker no fa servir (`?days=7&x=1`), repetir-los o
+ * escriure'ls amb un valor fora de rang no permet saltar-se la cache i provocar
+ * lectures noves a D1: totes les variants d'una mateixa consulta comparteixen
+ * entrada. És el que evita que es pugui buidar la butxaca de lectures a base de
+ * peticions amb paràmetres inventats.
+ */
+async function withCache(
+  request: Request,
+  canonical: string,
+  maxAge: number,
+  producer: () => Promise<Response>,
+): Promise<Response> {
   const cache = caches.default;
-  const key = new Request(new URL(request.url).toString(), { method: "GET" });
+  const key = new Request(new URL(canonical, request.url).toString(), { method: "GET" });
   const hit = await cache.match(key);
   if (hit) return hit;
   const res = await producer();
@@ -572,52 +609,63 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   const nowTs = Math.floor(Date.now() / 1000);
 
   if (path === "/api/parkings") {
-    const { results } = await env.DB.prepare("SELECT * FROM parkings ORDER BY id").all<ParkingInfo>();
-    return json(results, { maxAge: 3600 });
+    return withCache(request, path, 3600, async () => {
+      const { results } = await env.DB.prepare("SELECT * FROM parkings ORDER BY id").all<ParkingInfo>();
+      return json(results, { maxAge: 3600 });
+    });
   }
 
   if (path === "/api/latest") {
-    const { results } = await env.DB.prepare(
-      `SELECT r.ts, r.parking_id, p.slug, p.name, r.capacity, r.available
-       FROM readings r JOIN parkings p ON p.id = r.parking_id
-       WHERE r.ts >= ?1 ORDER BY r.ts, r.parking_id`,
-    )
-      .bind(nowTs - SPARK_MINUTES * 60)
-      .all<LatestRow>();
-    const byParking = new Map<number, { last: LatestRow; spark: [number, number][] }>();
-    for (const r of results) {
-      const e = byParking.get(r.parking_id);
-      if (e) {
-        e.last = r;
-        e.spark.push([r.ts, r.available]);
-      } else byParking.set(r.parking_id, { last: r, spark: [[r.ts, r.available]] });
-    }
-    const parkings: LatestParking[] = [...byParking.values()].map(({ last, spark }) => ({
-      parking_id: last.parking_id,
-      parking_slug: last.slug,
-      name: last.name,
-      timestamp_utc: isoUtc(last.ts),
-      timestamp_local: localIso(last.ts, tz),
-      capacity: last.capacity,
-      available: last.available,
-      occupied: last.capacity - last.available,
-      occupancy_pct: pct(last.capacity, last.available),
-      spark,
-    }));
-    const payload: LatestResponse = { generated_at: isoUtc(nowTs), parkings };
-    return json(payload, { maxAge: 30 });
+    return withCache(request, path, 30, async () => {
+      const { results } = await env.DB.prepare(
+        `SELECT r.ts, r.parking_id, p.slug, p.name, r.capacity, r.available
+         FROM readings r JOIN parkings p ON p.id = r.parking_id
+         WHERE r.ts >= ?1 ORDER BY r.ts, r.parking_id`,
+      )
+        .bind(nowTs - SPARK_MINUTES * 60)
+        .all<LatestRow>();
+      const byParking = new Map<number, { last: LatestRow; spark: [number, number][] }>();
+      for (const r of results) {
+        const e = byParking.get(r.parking_id);
+        if (e) {
+          e.last = r;
+          e.spark.push([r.ts, r.available]);
+        } else byParking.set(r.parking_id, { last: r, spark: [[r.ts, r.available]] });
+      }
+      const parkings: LatestParking[] = [...byParking.values()].map(({ last, spark }) => ({
+        parking_id: last.parking_id,
+        parking_slug: last.slug,
+        name: last.name,
+        timestamp_utc: isoUtc(last.ts),
+        timestamp_local: localIso(last.ts, tz),
+        capacity: last.capacity,
+        available: last.available,
+        occupied: last.capacity - last.available,
+        occupancy_pct: pct(last.capacity, last.available),
+        spark,
+      }));
+      const payload: LatestResponse = { generated_at: isoUtc(nowTs), parkings };
+      return json(payload, { maxAge: 30 });
+    });
   }
 
   if (path === "/api/status") {
     // Opcions cares, només si es demanen: el total obliga a recórrer tota la
-    // taula, i l'HTML dels errors infla la resposta.
-    const health = await checkHealth(env, new Date(), {
-      totals: url.searchParams.get("totals") === "1",
-      html: url.searchParams.get("html") === "1",
+    // taula, i l'HTML dels errors infla la resposta. Es normalitzen aquí perquè
+    // la clau de la cache no depengui de com s'hagin escrit els paràmetres.
+    const totals = url.searchParams.get("totals") === "1";
+    const html = url.searchParams.get("html") === "1";
+    // La forma per defecte no es cacheja: les seves consultes ja estan acotades
+    // (és l'adreça més barata de totes) i és la superfície de vigilància, que
+    // convé sempre fresca —una resposta cachejada podria amagar mig minut que la
+    // captura s'ha aturat. Només es cacheja `?totals=1`, que és l'única variant
+    // que recorre tota la taula i que, si no, es podria repetir a voluntat.
+    return withCache(request, `${path}?totals=${totals}&html=${html}`, totals ? 300 : 0, async () => {
+      const health = await checkHealth(env, new Date(), { totals, html });
+      // 503 quan la captura no va bé: així un monitor extern se n'assabenta sense
+      // haver d'interpretar el cos de la resposta.
+      return json(health, { status: health.healthy ? 200 : 503, maxAge: 30 });
     });
-    // 503 quan la captura no va bé: així un monitor extern se n'assabenta sense
-    // haver d'interpretar el cos de la resposta.
-    return json(health, { status: health.healthy ? 200 : 503, maxAge: 30 });
   }
 
   // /api/day/AAAA-MM-DD (json)  |  /data/AAAA-MM-DD.csv
@@ -632,7 +680,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     // deixa de dependre de les visites (les captures són per minut, de manera
     // que no s'hi perd frescor real).
     const maxAge = past ? 86_400 : 60;
-    return withCache(request, maxAge, async () => {
+    return withCache(request, path, maxAge, async () => {
       const recs = (await queryReadings(env, "r.local_date = ?1", [day])).map((r) => rowToRecord(r, tz));
       return asCsv ? csv(toCsv(recs), `parking-terrassa-${day}.csv`, { maxAge }) : json(recs, { maxAge });
     });
@@ -643,7 +691,9 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   if (monthMatch) {
     const month = monthMatch[1] as string;
     const past = month < closedBefore.slice(0, 7);
-    return withCache(request, past ? 86_400 : 0, async () => {
+    // El mes en curs també es guarda a la cache: una petició llegeix el mes
+    // sencer (~130.000 files a final de mes), la lectura més cara de totes.
+    return withCache(request, path, past ? 86_400 : 300, async () => {
       const rows = await queryReadings(env, "r.local_date >= ?1 AND r.local_date < ?2", [`${month}-01`, `${month}-32`]);
       return csv(toCsv(rows.map((r) => rowToRecord(r, tz))), `parking-terrassa-${month}.csv`, {
         maxAge: past ? 86_400 : 300,
@@ -653,53 +703,57 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 
   if (path === "/api/hourly") {
     const days = Math.min(Math.max(Number(url.searchParams.get("days") ?? 7) || 7, 1), 92);
-    const { results } = await env.DB.prepare(
-      `SELECT h.hour_ts, h.parking_id, p.slug, h.capacity, h.n, h.avg_available, h.min_available, h.max_available
-       FROM hourly h JOIN parkings p ON p.id = h.parking_id
-       WHERE h.hour_ts >= ?1 ORDER BY h.hour_ts, h.parking_id`,
-    )
-      .bind(nowTs - days * 86_400)
-      .all<HourlyRow>();
-    const out: HourlyRecord[] = results.map((r) => ({
-        hour_utc: isoUtc(r.hour_ts),
-        hour_local: localIso(r.hour_ts, tz),
-        parking_id: r.parking_id,
-        parking_slug: r.slug,
-        capacity: r.capacity,
-        n: r.n,
-        avg_available: Math.round(r.avg_available * 10) / 10,
-        min_available: r.min_available,
-        max_available: r.max_available,
-        avg_occupancy_pct: pct(r.capacity, r.avg_available),
-    }));
-    return json(out, { maxAge: 300 });
+    return withCache(request, `${path}?days=${days}`, 300, async () => {
+      const { results } = await env.DB.prepare(
+        `SELECT h.hour_ts, h.parking_id, p.slug, h.capacity, h.n, h.avg_available, h.min_available, h.max_available
+         FROM hourly h JOIN parkings p ON p.id = h.parking_id
+         WHERE h.hour_ts >= ?1 ORDER BY h.hour_ts, h.parking_id`,
+      )
+        .bind(nowTs - days * 86_400)
+        .all<HourlyRow>();
+      const out: HourlyRecord[] = results.map((r) => ({
+          hour_utc: isoUtc(r.hour_ts),
+          hour_local: localIso(r.hour_ts, tz),
+          parking_id: r.parking_id,
+          parking_slug: r.slug,
+          capacity: r.capacity,
+          n: r.n,
+          avg_available: Math.round(r.avg_available * 10) / 10,
+          min_available: r.min_available,
+          max_available: r.max_available,
+          avg_occupancy_pct: pct(r.capacity, r.avg_available),
+      }));
+      return json(out, { maxAge: 300 });
+    });
   }
 
   if (path === "/api/heatmap") {
     const weeks = Math.min(Math.max(Number(url.searchParams.get("weeks") ?? 8) || 8, 1), 52);
-    const { results } = await env.DB.prepare(
-      `SELECT h.parking_id, p.slug, h.local_dow, h.local_hour,
-              AVG(100.0 * (h.capacity - h.avg_available) / h.capacity) AS avg_occupancy_pct,
-              SUM(h.n) AS n
-       FROM hourly h JOIN parkings p ON p.id = h.parking_id
-       WHERE h.hour_ts >= ?1
-       GROUP BY h.parking_id, h.local_dow, h.local_hour
-       ORDER BY h.parking_id, h.local_dow, h.local_hour`,
-    )
-      .bind(nowTs - weeks * 7 * 86_400)
-      .all<HeatmapRow>();
-    const payload: HeatmapResponse = {
-        weeks,
-        cells: results.map((r) => ({
-          parking_id: r.parking_id,
-          parking_slug: r.slug,
-          dow: r.local_dow,
-          hour: r.local_hour,
-          avg_occupancy_pct: Math.round(r.avg_occupancy_pct * 10) / 10,
-          n: r.n,
-        })),
-    };
-    return json(payload, { maxAge: 600 });
+    return withCache(request, `${path}?weeks=${weeks}`, 600, async () => {
+      const { results } = await env.DB.prepare(
+        `SELECT h.parking_id, p.slug, h.local_dow, h.local_hour,
+                AVG(100.0 * (h.capacity - h.avg_available) / h.capacity) AS avg_occupancy_pct,
+                SUM(h.n) AS n
+         FROM hourly h JOIN parkings p ON p.id = h.parking_id
+         WHERE h.hour_ts >= ?1
+         GROUP BY h.parking_id, h.local_dow, h.local_hour
+         ORDER BY h.parking_id, h.local_dow, h.local_hour`,
+      )
+        .bind(nowTs - weeks * 7 * 86_400)
+        .all<HeatmapRow>();
+      const payload: HeatmapResponse = {
+          weeks,
+          cells: results.map((r) => ({
+            parking_id: r.parking_id,
+            parking_slug: r.slug,
+            dow: r.local_dow,
+            hour: r.local_hour,
+            avg_occupancy_pct: Math.round(r.avg_occupancy_pct * 10) / 10,
+            n: r.n,
+          })),
+      };
+      return json(payload, { maxAge: 600 });
+    });
   }
 
   // /api/santroc?days=30&threshold=25 : places lliures combinades dels pàrquings propers al Portal de Sant Roc
@@ -708,48 +762,50 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     const thrParam = Number(url.searchParams.get("threshold") ?? 25);
     const threshold: SantRocThreshold = (SANT_ROC_THRESHOLDS as readonly number[]).includes(thrParam) ? (thrParam as SantRocThreshold) : 25;
     const fromDay = localParts(new Date(Date.now() - (days - 1) * 86_400_000), tz).local_date;
-    const ids = SANT_ROC_PARKINGS.join(",");
-    const [cap, closed, live] = await env.DB.batch<Record<string, unknown>>([
-      env.DB.prepare(`SELECT SUM(capacity) AS capacity FROM parkings WHERE id IN (${ids})`),
-      // Dies tancats: taula precomputada (una fila per dia).
-      env.DB.prepare("SELECT * FROM daily_santroc WHERE day >= ?1 AND day < ?2 ORDER BY day").bind(fromDay, today),
-      // Avui: càlcul en viu sobre els minuts d'avui.
-      // SQLite: amb un únic MIN() a la consulta, la columna nua "ts" pren el valor de la fila del mínim.
-      env.DB.prepare(
-        `SELECT day, COUNT(*) AS minutes, MIN(free) AS min_free, ts AS min_ts,
-                SUM(CASE WHEN free < ?2 THEN 1 ELSE 0 END) AS minutes_below
-         FROM (
-           SELECT ts, MIN(local_date) AS day, SUM(available) AS free
-           FROM readings
-           WHERE parking_id IN (${ids}) AND local_date = ?1
-           GROUP BY ts
-           HAVING COUNT(*) = ${SANT_ROC_PARKINGS.length}
-         )
-         GROUP BY day`,
-      ).bind(today, threshold),
-    ]);
-    const capacity = Number((cap?.results[0] as { capacity: number | null } | undefined)?.capacity ?? 0);
-    const closedRows = (closed?.results ?? []) as unknown as DailySantRocRow[];
-    const liveRows = (live?.results ?? []) as unknown as SantRocDayRow[];
-    const belowKey = `below_${threshold}` as const;
-    const dayRows: SantRocDayRow[] = [
-      ...closedRows.map((r) => ({ day: r.day, minutes: r.minutes, min_free: r.min_free, min_ts: r.min_ts, minutes_below: r[belowKey] })),
-      ...liveRows,
-    ];
-    const payload: SantRocResponse = {
-        parking_ids: [...SANT_ROC_PARKINGS],
-        capacity,
-        threshold,
-        days: dayRows.map((r) => ({
-          day: r.day,
-          minutes: r.minutes,
-          min_free: r.min_free,
-          min_at_utc: isoUtc(r.min_ts),
-          min_at_local: localIso(r.min_ts, tz),
-          minutes_below: r.minutes_below,
-        })),
-    };
-    return json(payload, { maxAge: 300 });
+    return withCache(request, `${path}?days=${days}&threshold=${threshold}`, 300, async () => {
+      const ids = SANT_ROC_PARKINGS.join(",");
+      const [cap, closed, live] = await env.DB.batch<Record<string, unknown>>([
+        env.DB.prepare(`SELECT SUM(capacity) AS capacity FROM parkings WHERE id IN (${ids})`),
+        // Dies tancats: taula precomputada (una fila per dia).
+        env.DB.prepare("SELECT * FROM daily_santroc WHERE day >= ?1 AND day < ?2 ORDER BY day").bind(fromDay, today),
+        // Avui: càlcul en viu sobre els minuts d'avui.
+        // SQLite: amb un únic MIN() a la consulta, la columna nua "ts" pren el valor de la fila del mínim.
+        env.DB.prepare(
+          `SELECT day, COUNT(*) AS minutes, MIN(free) AS min_free, ts AS min_ts,
+                  SUM(CASE WHEN free < ?2 THEN 1 ELSE 0 END) AS minutes_below
+           FROM (
+             SELECT ts, MIN(local_date) AS day, SUM(available) AS free
+             FROM readings
+             WHERE parking_id IN (${ids}) AND local_date = ?1
+             GROUP BY ts
+             HAVING COUNT(*) = ${SANT_ROC_PARKINGS.length}
+           )
+           GROUP BY day`,
+        ).bind(today, threshold),
+      ]);
+      const capacity = Number((cap?.results[0] as { capacity: number | null } | undefined)?.capacity ?? 0);
+      const closedRows = (closed?.results ?? []) as unknown as DailySantRocRow[];
+      const liveRows = (live?.results ?? []) as unknown as SantRocDayRow[];
+      const belowKey = `below_${threshold}` as const;
+      const dayRows: SantRocDayRow[] = [
+        ...closedRows.map((r) => ({ day: r.day, minutes: r.minutes, min_free: r.min_free, min_ts: r.min_ts, minutes_below: r[belowKey] })),
+        ...liveRows,
+      ];
+      const payload: SantRocResponse = {
+          parking_ids: [...SANT_ROC_PARKINGS],
+          capacity,
+          threshold,
+          days: dayRows.map((r) => ({
+            day: r.day,
+            minutes: r.minutes,
+            min_free: r.min_free,
+            min_at_utc: isoUtc(r.min_ts),
+            min_at_local: localIso(r.min_ts, tz),
+            minutes_below: r.minutes_below,
+          })),
+      };
+      return json(payload, { maxAge: 300 });
+    });
   }
 
   if (path === "/api/days") {
@@ -758,7 +814,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     // com a suma de `n`, i costa unes seixanta vegades menys de llegir. Un dia
     // tancat hi és sencer; el dia en curs només hi surt fins a l'última hora
     // agregada, i el dashboard ja no en mostra el recompte.
-    return withCache(request, 300, async () => {
+    return withCache(request, path, 300, async () => {
       const { results } = await env.DB.prepare(
         "SELECT local_date AS day, SUM(n) AS rows_ FROM hourly GROUP BY local_date ORDER BY local_date DESC LIMIT 400",
       ).all<{ day: string; rows_: number }>();
