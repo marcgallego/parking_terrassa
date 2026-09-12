@@ -1,7 +1,7 @@
 /** Proves de `parseOccupancy`: el punt on el projecte depèn del format de saba.es. */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { htmlSnippet, parseOccupancy } from "../src/index";
+import { MissingAvailability, htmlSnippet, parseOccupancy } from "../src/index";
 
 /** Fragment real d'una fitxa de saba.es (el mateix que fa servir local-scraper/tests). */
 const SAMPLE = `
@@ -88,3 +88,44 @@ test("htmlSnippet no falla amb pàgines curtes o buides", () => {
   assert.equal(htmlSnippet(""), "");
   assert.equal(htmlSnippet("curt"), "curt");
 });
+
+// --- El cas real: saba.es publica la capacitat sense les places lliures ------
+
+/**
+ * Fragment desat per la captura del 2026-09-12 a les 04:31 UTC (Plaça Vella).
+ * El bloc hi és, amb la capacitat correcta, però la meitat de «Places
+ * disponibles» no s'ha servit. Es conserva tal com va arribar.
+ */
+const SENSE_DISPONIBLES = `heet-container-header-location-text">
+                    Carrer Major, Plaça Vella 08221, Terrassa 
+                    <!--<span>- 0.0 Km fins a la teva ubicació</span>-->
+\t                    <div class="available-places">Places: <strong>297</strong>   </div>
+                </div>`;
+
+test("distingeix la disponibilitat no publicada d'un format desconegut", () => {
+  assert.throws(() => parseOccupancy(SENSE_DISPONIBLES), MissingAvailability);
+  assert.throws(() => parseOccupancy(SENSE_DISPONIBLES), /no porta 'Places disponibles'/);
+});
+
+test("un format desconegut NO es confon amb la disponibilitat no publicada", () => {
+  // Hi ha «Places disponibles», però amb un format que no se sap llegir: això
+  // vol dir tocar el parser, no reintentar.
+  const altre = '<div class="available-places">Places: <strong>297</strong> | Places disponibles: moltes</div>';
+  assert.throws(() => parseOccupancy(altre), /format inesperat/);
+  assert.ok(!(getError(() => parseOccupancy(altre)) instanceof MissingAvailability));
+});
+
+test("el bloc absent tampoc no es confon amb cap dels altres dos", () => {
+  const err = getError(() => parseOccupancy("<html><body>res</body></html>"));
+  assert.match(String(err), /no s'ha trobat/);
+  assert.ok(!(err instanceof MissingAvailability));
+});
+
+function getError(fn: () => unknown): unknown {
+  try {
+    fn();
+    return undefined;
+  } catch (e) {
+    return e;
+  }
+}
