@@ -1,0 +1,205 @@
+/* Pàgina del Portal de Sant Roc: places lliures sumades d'Ajuntament-Mercat i Plaça Vella. */
+import { getJson } from "./api";
+import type { DayRecord, SantRocDay, SantRocResponse, Slug } from "./api";
+import { $, COLOR_VAR, NAMES, SANT_ROC, addDays, atSec, chips, cssVar, esc, fmtDay, fmtTime, localToday, logErr, pct1, renderStatus, tableHtml, tipRow, zonedMidnight } from "./common";
+import { alignSeries, barSeries, baseOptions, lineSeries, mount, refLinePlugin, timeAxis, tooltipPlugin, valueAxis } from "./charts";
+
+// Aquesta pàgina és la portada; els enllaços antics a la de tots els pàrquings (/?range=, /?weeks=) porten a /saba.
+const legacyParams = new URLSearchParams(location.search);
+const legacy = legacyParams.has("range") || legacyParams.has("weeks");
+if (legacy) location.replace(`/saba${location.search}`);
+
+type Days = "30" | "90" | "365";
+type Threshold = "10" | "25" | "50";
+
+/** Un minut d'avui amb lectura dels dos pàrquings. `x` en segons Unix. */
+interface FreePoint { x: number; free: number; capacity: number; parts: Partial<Record<Slug, number>> }
+
+let days = chips<Days>("srdays", ["30", "90", "365"], "30", (v) => { days = v; loadPeriod().catch(logErr); });
+let threshold = Number(chips<Threshold>("threshold", ["10", "25", "50"], "25", (v) => {
+  threshold = Number(v);
+  renderToday();
+  renderStats();
+  loadPeriod().catch(logErr);
+}));
+
+let today: FreePoint[] | null = null;
+let todayDay = localToday();
+let period: SantRocResponse | null = null;
+let periodDay = "";
+let todayReq = 0, periodReq = 0;
+
+const names = SANT_ROC.map((s) => NAMES[s]).join(" + ");
+const fmtMinute = (s: number): string => atSec(fmtTime, s);
+const narrowHeight = (narrow: number, wide: number) => (w: number): number => (w < 560 ? narrow : wide);
+
+// ----- avui ------------------------------------------------------------------
+async function loadToday(): Promise<void> {
+  const req = ++todayReq;
+  const day = localToday();
+  const rows = await getJson<DayRecord[]>(`/api/day/${day}`);
+  if (req !== todayReq) return;
+  const byTs = new Map<number, Partial<Record<Slug, DayRecord>>>();
+  let last = 0;
+  for (const r of rows) {
+    if (!SANT_ROC.includes(r.parking_slug)) continue;
+    const t = Date.parse(r.timestamp_utc);
+    last = Math.max(last, t);
+    const e = byTs.get(t) ?? {};
+    e[r.parking_slug] = r;
+    byTs.set(t, e);
+  }
+  renderStatus(last);
+  const points: FreePoint[] = [];
+  for (const [t, e] of [...byTs.entries()].sort((a, b) => a[0] - b[0])) {
+    const parts = SANT_ROC.map((s) => e[s]);
+    if (!parts.every((p): p is DayRecord => p !== undefined)) continue;
+    points.push({
+      x: t / 1000,
+      free: parts.reduce((a, p) => a + p.available, 0),
+      capacity: parts.reduce((a, p) => a + p.capacity, 0),
+      parts: Object.fromEntries(parts.map((p) => [p.parking_slug, p.available])),
+    });
+  }
+  today = points;
+  todayDay = day;
+  renderToday();
+  renderStats();
+}
+
+function renderToday(): void {
+  if (!today) return;
+  const points = today, t = threshold, day = todayDay;
+  const capacity = points[points.length - 1]?.capacity ?? period?.capacity ?? 0;
+  const yMax = Math.max(capacity, t * 2, ...points.map((p) => p.free));
+  const byX = new Map(points.map((p) => [p.x, p]));
+  // Tres línies des de zero: el total (que és el que es compara amb el llindar) i cada pàrquing.
+  const parkings: readonly Slug[] = ["placa-vella", "ajuntament-mercat"];
+  mount($("#sr-today"), {
+    data: alignSeries(points.map((p) => p.x), [(x) => byX.get(x)?.free, ...parkings.map((s) => (x: number) => byX.get(x)?.parts[s])], 5 * 60),
+    empty: "Encara no hi ha lectures d'avui",
+    height: narrowHeight(240, 300),
+    options: () => {
+      const cTotal = cssVar("--text-primary");
+      return {
+        ...baseOptions(),
+        series: [
+          {},
+          lineSeries("total", cTotal, { width: 2.5 }),
+          ...parkings.map((s) => lineSeries(NAMES[s], cssVar(COLOR_VAR[s]), { width: 1.5 })),
+        ],
+        scales: { x: { time: true, range: [zonedMidnight(day), zonedMidnight(addDays(day, 1))] }, y: { range: [0, yMax] } },
+        axes: [timeAxis("clock"), valueAxis(String)],
+        plugins: [
+          refLinePlugin(t, `llindar: ${t} lliures`, cssVar("--bad")),
+          tooltipPlugin((u, idx) => {
+            const x = u.data[0][idx] ?? 0, p = byX.get(x);
+            let html = `<b>avui · ${esc(fmtMinute(x))}</b>`;
+            if (!p) return html + tipRow("places lliures", "sense lectura");
+            html += tipRow("total", `${p.free} de ${p.capacity}`, cTotal);
+            for (const s of parkings) html += tipRow(NAMES[s], String(p.parts[s] ?? "–"), cssVar(COLOR_VAR[s]));
+            return html;
+          }),
+        ],
+      };
+    },
+  });
+}
+
+// ----- període ---------------------------------------------------------------
+async function loadPeriod(): Promise<void> {
+  const req = ++periodReq;
+  const day = localToday();
+  const sr = await getJson<SantRocResponse>(`/api/santroc?days=${days}&threshold=${threshold}`);
+  if (req !== periodReq) return;
+  period = sr;
+  periodDay = day;
+  renderPeriod();
+  renderStats();
+}
+
+/** El període només compta dies complets; el dia d'avui té les seves pròpies estadístiques. */
+const completeDays = (): SantRocDay[] => (period ? period.days.filter((d) => d.day !== localToday()) : []);
+
+function renderPeriod(): void {
+  if (!period) return;
+  const list = completeDays(), t = period.threshold;
+  const xs = list.map((d) => zonedMidnight(d.day) + 12 * 3600);
+  const byX = new Map(list.map((d, i) => [xs[i] ?? 0, d]));
+  const yMax = Math.max(t * 2, ...list.map((d) => d.min_free)) * 1.1;
+  $("#sr-daily-hint").textContent = `Cada barra és el moment del dia amb menys places lliures sumant ${names}. En vermell, els dies que han baixat de ${t}. ${list.length} dies complets analitzats.`;
+  mount($("#sr-daily"), {
+    data: [xs, list.map((d) => (d.min_free < t ? null : d.min_free)), list.map((d) => (d.min_free < t ? d.min_free : null))],
+    empty: "Encara no hi ha dies complets",
+    height: narrowHeight(200, 240),
+    options: () => {
+      const base = baseOptions();
+      return {
+        ...base,
+        cursor: { ...base.cursor, points: { show: false } },
+        series: [{}, barSeries(`${t} lliures o més`, cssVar("--text-muted")), barSeries(`menys de ${t} lliures`, cssVar("--bad"))],
+        // mig dia de marge a cada banda perquè la primera i l'última barra no quedin tallades
+        scales: { x: { time: true, range: [(xs[0] ?? 0) - 12 * 3600, (xs[xs.length - 1] ?? 0) + 12 * 3600] }, y: { range: [0, yMax] } },
+        axes: [timeAxis("calendar"), valueAxis(String)],
+        plugins: [
+          refLinePlugin(t, `llindar: ${t}`, cssVar("--bad")),
+          tooltipPlugin((u, idx) => {
+            const x = u.data[0][idx] ?? 0, d = byX.get(x);
+            if (!d) return "";
+            return `<b>${esc(atSec(fmtDay, x))}</b>`
+              + tipRow("mínim", `${d.min_free} lliures a les ${fmtTime.format(new Date(d.min_at_utc))}`)
+              + tipRow(`sota ${t}`, `${d.minutes_below} min`)
+              + tipRow("minuts amb lectura", String(d.minutes));
+          }),
+        ],
+      };
+    },
+  });
+  $("#sr-table").innerHTML = tableHtml(
+    ["dia", "mínim lliures", "hora del mínim", `minuts amb < ${t}`, "minuts amb lectura"],
+    list.map((d) => [d.day, String(d.min_free), fmtTime.format(new Date(d.min_at_utc)), String(d.minutes_below), String(d.minutes)]),
+  );
+}
+
+// ----- estadístiques ---------------------------------------------------------
+function statHtml(value: string, unit: string, label: string, sub = "", bad = false): string {
+  return `<div class="stat${bad ? " is-bad" : ""}"><div class="v">${esc(value)}${unit ? `<small>${esc(unit)}</small>` : ""}</div><div class="l">${esc(label)}</div>${sub ? `<div class="s">${esc(sub)}</div>` : ""}</div>`;
+}
+
+function renderStats(): void {
+  const points = today ?? [], t = threshold;
+  const now = points[points.length - 1];
+  const todayMin = points.reduce<FreePoint | null>((acc, p) => (acc === null || p.free < acc.free ? p : acc), null);
+  const out = [
+    now
+      ? statHtml(String(now.free), `de ${now.capacity}`, "places lliures ara mateix", `a les ${fmtMinute(now.x)}`, now.free < t)
+      : statHtml("–", "", "places lliures ara mateix", today ? "sense lectura d'avui" : "carregant…"),
+    todayMin ? statHtml(String(todayMin.free), "", "mínim d'avui", `a les ${fmtMinute(todayMin.x)}`, todayMin.free < t) : statHtml("–", "", "mínim d'avui"),
+  ];
+  if (period) {
+    const list = completeDays(), pt = period.threshold;
+    const totalMinutes = list.reduce((a, d) => a + d.minutes, 0);
+    const belowMinutes = list.reduce((a, d) => a + d.minutes_below, 0);
+    const daysBelow = list.filter((d) => d.minutes_below > 0).length;
+    const worst = list.reduce<SantRocDay | null>((acc, d) => (acc === null || d.min_free < acc.min_free ? d : acc), null);
+    out.push(
+      statHtml(String(daysBelow), `de ${list.length} dies`, `dies amb menys de ${pt} lliures`, list.length ? `${pct1((100 * daysBelow) / list.length)} % dels dies complets` : "encara cap dia complet", daysBelow > 0),
+      statHtml(totalMinutes ? pct1((100 * belowMinutes) / totalMinutes) : "–", totalMinutes ? "%" : "","del temps sota el llindar", totalMinutes ? `${belowMinutes.toLocaleString("ca")} de ${totalMinutes.toLocaleString("ca")} minuts` : "", belowMinutes > 0),
+      worst ? statHtml(String(worst.min_free), "lliures", "mínim del període", `${fmtDay.format(new Date(worst.min_at_utc))} a les ${fmtTime.format(new Date(worst.min_at_utc))}`, worst.min_free < pt) : statHtml("–", "", "mínim del període"),
+    );
+  }
+  $("#sr-stats").innerHTML = out.join("");
+}
+
+// ----- init ------------------------------------------------------------------
+if (!legacy) {
+  renderStats();
+  loadToday().catch((e: unknown) => { $("#status-text").textContent = "No s'han pogut carregar les lectures d'avui"; logErr(e); });
+  loadPeriod().catch(logErr);
+  window.setInterval(() => {
+    loadToday().catch(logErr);
+    // Els dies complets només canvien quan canvia el dia.
+    if (periodDay && periodDay !== localToday()) loadPeriod().catch(logErr);
+  }, 60_000);
+}
+
