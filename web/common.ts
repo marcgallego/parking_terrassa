@@ -147,6 +147,26 @@ export function renderStatus(lastMs: number): void {
   text.textContent = ageMin <= 1 ? "En viu · actualitzat ara mateix" : `Última lectura fa ${ageMin} min (${fmtDayTime.format(new Date(lastMs))})`;
 }
 
+// ----- avisos ----------------------------------------------------------------
+/** Escriu l'avís de `#notice`, o l'amaga amb `null`. */
+export function setNotice(text: string | null): void {
+  const el = $("#notice");
+  el.textContent = text ?? "";
+  el.hidden = text === null;
+}
+
+/**
+ * Text quan un refresc falla. Si ja hi havia dades, es continuen mostrant i
+ * se'n diu l'hora, en lloc de buidar els gràfics o deixar-ho només a la consola.
+ */
+export const staleNotice = (at: number | null): string =>
+  at === null
+    ? "No s'han pogut carregar les dades d'avui. Es tornarà a provar d'aquí a un minut."
+    : `No s'ha pogut actualitzar: es mostren les dades de les ${fmtTime.format(new Date(at))}. Es tornarà a provar d'aquí a un minut.`;
+
+/** Ocupació en percentatge amb una decimal, com la calcula el Worker. */
+export const occupancyPct = (capacity: number, available: number): number => Math.round((1000 * (capacity - available)) / capacity) / 10;
+
 // ----- taules ----------------------------------------------------------------
 export function tableHtml(head: string[], rows: string[][]): string {
   const th = head.map((h, i) => `<th class="${i ? "num" : ""}">${esc(h)}</th>`).join("");

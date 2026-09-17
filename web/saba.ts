@@ -1,8 +1,8 @@
 /* Pàgina dels pàrquings Saba (/saba): estat dels tres pàrquings, ocupació, patró setmanal i dades obertes. */
 import type uPlot from "uplot";
 import { getJson } from "./api";
-import type { DayCount, DayRecord, HeatmapResponse, HourlyRecord, LatestResponse, Slug } from "./api";
-import { $, COLOR_VAR, NAMES, ORDER, addDays, atSec, chips, cssVar, esc, fmtDate, fmtDayTime, fmtTime, hideTip, localToday, logErr, onThemeChange, pad2, pct1, renderStatus, seq, showTip, tableHtml, tipRow, zonedMidnight } from "./common";
+import type { DayCount, DaySeriesParking, DaySeriesResponse, HeatmapResponse, HourlyRecord, LatestResponse, Slug } from "./api";
+import { $, COLOR_VAR, NAMES, ORDER, addDays, atSec, chips, cssVar, esc, fmtDate, fmtDayTime, fmtTime, hideTip, localToday, logErr, occupancyPct, onThemeChange, pad2, pct1, renderStatus, seq, setNotice, showTip, staleNotice, tableHtml, tipRow, zonedMidnight } from "./common";
 import { alignSeries, baseOptions, lineSeries, mount, setSeriesShown, sparkOptions, timeAxis, tooltipPlugin, valueAxis } from "./charts";
 
 const DOW = ["dl", "dt", "dc", "dj", "dv", "ds", "dg"] as const;
@@ -56,6 +56,9 @@ const lineHost = $("#line-chart");
 /** Pàrquings amagats des de la llegenda; es mantenen en canviar d'interval. */
 const hidden = new Set<Slug>();
 let rangeReq = 0;
+type SeriesPoint = DaySeriesParking["points"][number];
+/** Quan es van carregar les dades d'avui que es veuen, per avisar si deixen d'estar fresques. */
+let todayAt: number | null = null;
 
 interface OccupancyOpts {
   xRange?: [number, number];
@@ -125,25 +128,51 @@ async function loadRange(range: Range): Promise<void> {
   const tbl = $("#line-table");
   if (range === "today") {
     const day = localToday();
-    const rows = await getJson<DayRecord[]>(`/api/day/${day}`);
+    let data: DaySeriesResponse;
+    try {
+      // Format compacte: el dia en format llarg fa ~860 KB i costava prou CPU al
+      // Worker perquè Cloudflare el tallés (error 1102, que arriba com un 503).
+      data = await getJson<DaySeriesResponse>(`/api/day/${day}/series`);
+    } catch {
+      // Sense lectures noves es manté el gràfic que ja es veu, dient de quan és.
+      if (req === rangeReq) setNotice(staleNotice(todayAt));
+      return;
+    }
     if (req !== rangeReq) return;
-    const byTs = indexBy(rows, (r) => r.timestamp_utc);
+    setNotice(null);
+    const byTs = new Map<number, Partial<Record<Slug, SeriesPoint>>>();
+    for (const p of data.parkings) {
+      for (const pt of p.points) {
+        const e = byTs.get(pt[0]) ?? {};
+        e[p.parking_slug] = pt;
+        byTs.set(pt[0], e);
+      }
+    }
     const xs = [...byTs.keys()].sort((a, b) => a - b);
-    occupancyChart(alignSeries(xs, ORDER.map((s) => (x: number) => byTs.get(x)?.[s]?.occupancy_pct), 5 * 60), {
+    const pctAt = (x: number, s: Slug): number | undefined => { const pt = byTs.get(x)?.[s]; return pt ? occupancyPct(pt[2], pt[1]) : undefined; };
+    occupancyChart(alignSeries(xs, ORDER.map((s) => (x: number) => pctAt(x, s)), 5 * 60), {
       xRange: [zonedMidnight(day), zonedMidnight(addDays(day, 1))],
       axis: "clock",
       title: (x) => `${atSec(fmtDate, x)} · ${atSec(fmtTime, x)}`,
-      detail: (x, s) => { const r = byTs.get(x)?.[s]; return r ? `${r.available} lliures` : undefined; },
+      detail: (x, s) => { const pt = byTs.get(x)?.[s]; return pt ? `${pt[1]} lliures` : undefined; },
       empty: "Encara no hi ha lectures d'avui",
     });
     const step = Math.max(1, Math.floor(xs.length / 96)); // màxim ~96 files (cada 15 min)
     tbl.innerHTML = tableHtml(
       ["hora", ...ORDER.map((s) => `${NAMES[s]} (% / lliures)`)],
-      xs.filter((_, i) => i % step === 0).map((x) => [atSec(fmtTime, x), ...ORDER.map((s) => { const r = byTs.get(x)?.[s]; return r ? `${pct1(r.occupancy_pct)} % / ${r.available}` : "–"; })]),
+      xs.filter((_, i) => i % step === 0).map((x) => [atSec(fmtTime, x), ...ORDER.map((s) => { const pt = byTs.get(x)?.[s]; return pt ? `${pct1(occupancyPct(pt[2], pt[1]))} % / ${pt[1]}` : "–"; })]),
     );
+    todayAt = Date.now();
   } else {
-    const rows = await getJson<HourlyRecord[]>(`/api/hourly?days=${range}`);
+    let rows: HourlyRecord[];
+    try {
+      rows = await getJson<HourlyRecord[]>(`/api/hourly?days=${range}`);
+    } catch {
+      if (req === rangeReq) setNotice("No s'han pogut carregar les dades d'aquest interval. Torneu-ho a provar d'aquí a una estona.");
+      return;
+    }
     if (req !== rangeReq) return;
+    setNotice(null);
     const byTs = indexBy(rows, (r) => r.hour_utc);
     const xs = [...byTs.keys()].sort((a, b) => a - b);
     occupancyChart(alignSeries(xs, ORDER.map((s) => (x: number) => byTs.get(x)?.[s]?.avg_occupancy_pct), 2 * 3600), {

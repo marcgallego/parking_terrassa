@@ -1,7 +1,7 @@
 /* Pàgina del Portal de Sant Roc: places lliures sumades d'Ajuntament-Mercat i Plaça Vella. */
 import { getJson } from "./api";
-import type { DayRecord, HourlyRecord, SantRocDay, SantRocResponse, Slug } from "./api";
-import { $, COLOR_VAR, NAMES, SANT_ROC, addDays, atSec, chips, cssVar, esc, fmtDate, fmtDay, fmtDayTime, fmtTime, localToday, logErr, pct1, renderStatus, setChip, tableHtml, tipRow, zonedMidnight } from "./common";
+import type { DaySeriesParking, DaySeriesResponse, HourlyRecord, SantRocDay, SantRocResponse, Slug } from "./api";
+import { $, COLOR_VAR, NAMES, SANT_ROC, addDays, atSec, chips, cssVar, esc, fmtDate, fmtDay, fmtDayTime, fmtTime, localToday, logErr, pct1, renderStatus, setChip, setNotice, staleNotice, tableHtml, tipRow, zonedMidnight } from "./common";
 import { alignSeries, barSeries, baseOptions, clickPlugin, lineSeries, mount, refLinePlugin, timeAxis, tooltipPlugin, valueAxis } from "./charts";
 
 // Aquesta pàgina és la portada; els enllaços antics a la de tots els pàrquings (/?range=, /?weeks=) porten a /saba.
@@ -33,7 +33,11 @@ interface FreePoint {
 /** Un dia sencer, minut a minut, i l'instant (ms) de l'última lectura que en té. */
 interface DayData { points: FreePoint[]; last: number }
 
+type SeriesPoint = DaySeriesParking["points"][number];
+
 let today: FreePoint[] | null = null;
+/** Quan es van carregar les dades d'avui que es veuen, per avisar si deixen d'estar fresques. */
+let todayAt: number | null = null;
 let todayDay = localToday();
 let period: SantRocResponse | null = null;
 let periodDay = "";
@@ -65,26 +69,27 @@ const firstDay = (): string | null => period?.days[0]?.day ?? null;
 
 // ----- dades -----------------------------------------------------------------
 /** Agrupa les lectures d'un dia pels minuts en què tots dos pàrquings tenen lectura. */
-function toDayData(rows: DayRecord[]): DayData {
-  const byTs = new Map<number, Partial<Record<Slug, DayRecord>>>();
+function toDayData(data: DaySeriesResponse): DayData {
+  const byTs = new Map<number, Partial<Record<Slug, SeriesPoint>>>();
   let last = 0;
-  for (const r of rows) {
-    if (!SANT_ROC.includes(r.parking_slug)) continue;
-    const t = Date.parse(r.timestamp_utc);
-    last = Math.max(last, t);
-    const e = byTs.get(t) ?? {};
-    e[r.parking_slug] = r;
-    byTs.set(t, e);
+  for (const p of data.parkings) {
+    if (!SANT_ROC.includes(p.parking_slug)) continue;
+    for (const pt of p.points) {
+      last = Math.max(last, pt[0] * 1000);
+      const e = byTs.get(pt[0]) ?? {};
+      e[p.parking_slug] = pt;
+      byTs.set(pt[0], e);
+    }
   }
   const points: FreePoint[] = [];
   for (const [t, e] of [...byTs.entries()].sort((a, b) => a[0] - b[0])) {
-    const parts = SANT_ROC.map((s) => e[s]);
-    if (!parts.every((p): p is DayRecord => p !== undefined)) continue;
+    const vals = SANT_ROC.map((s) => e[s]);
+    if (!vals.every((p): p is SeriesPoint => p !== undefined)) continue;
     points.push({
-      x: t / 1000,
-      free: parts.reduce((a, p) => a + p.available, 0),
-      capacity: parts.reduce((a, p) => a + p.capacity, 0),
-      parts: Object.fromEntries(parts.map((p) => [p.parking_slug, p.available])),
+      x: t,
+      free: vals.reduce((a, p) => a + p[1], 0),
+      capacity: vals.reduce((a, p) => a + p[2], 0),
+      parts: Object.fromEntries(SANT_ROC.map((s) => [s, e[s]?.[1]])),
     });
   }
   return { points, last };
@@ -124,7 +129,9 @@ function toHourPoints(rows: HourlyRecord[]): FreePoint[] {
 }
 
 async function fetchDay(d: string): Promise<DayData> {
-  const data = toDayData(await getJson<DayRecord[]>(`/api/day/${d}`));
+  // Format compacte: el dia en format llarg fa ~860 KB i costava prou CPU al
+  // Worker perquè Cloudflare el tallés (error 1102, que arriba com un 503).
+  const data = toDayData(await getJson<DaySeriesResponse>(`/api/day/${d}/series`));
   dayCache.set(d, data);
   return data;
 }
@@ -133,12 +140,23 @@ async function fetchDay(d: string): Promise<DayData> {
 async function loadToday(): Promise<void> {
   const req = ++todayReq;
   const d = localToday();
-  const data = await fetchDay(d);
+  let data: DayData;
+  try {
+    data = await fetchDay(d);
+  } catch {
+    if (req !== todayReq) return;
+    // Sense lectures noves es manté el que ja es veu (gràfic i estadístiques), dient de quan és.
+    if (!today) $("#status-text").textContent = "No s'han pogut carregar les lectures d'avui";
+    setNotice(staleNotice(todayAt));
+    return;
+  }
   if (req !== todayReq) return;
   // El dia que s'acaba de tancar estava a mitges; es tornarà a demanar sencer si es mira.
   if (d !== todayDay) dayCache.delete(todayDay);
   today = data.points;
   todayDay = d;
+  todayAt = Date.now();
+  setNotice(null);
   renderStatus(data.last);
   if (interval === "dia" && day === d) renderChart();
   renderStats();
@@ -395,7 +413,7 @@ if (!legacy) {
 
   renderStats();
   renderChart();
-  loadToday().catch((e: unknown) => { $("#status-text").textContent = "No s'han pogut carregar les lectures d'avui"; logErr(e); });
+  loadToday().catch(logErr);
   if (interval === "dia") { if (day !== localToday()) loadChartDay(day).catch(logErr); }
   else loadHourly(interval).catch(logErr);
   loadPeriod().catch(logErr);

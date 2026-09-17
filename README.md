@@ -61,6 +61,7 @@ Endpoints (CORS obert):
 | `/data/AAAA-MM-DD.csv` | un dia sencer |
 | `/data/AAAA-MM.csv` | un mes sencer. Es munta cada matinada a partir dels CSV diaris (vegeu [el límit de CPU](#desplegament-a-cloudflare)), així que el del mes en curs arriba fins a l'última còpia, normalment ahir; el dia d'avui és a `/data/AAAA-MM-DD.csv` |
 | `/api/day/AAAA-MM-DD` | un dia en JSON |
+| `/api/day/AAAA-MM-DD/series` | el mateix dia, agrupat per pàrquing i sense camps derivats: `{day, parkings: [{parking_id, parking_slug, points: [[segons Unix, lliures, capacitat], …]}]}`. Pesa unes deu vegades menys; és el que carrega el dashboard |
 | `/api/latest` | última lectura de cada pàrquing i sèrie de les últimes 3 h |
 | `/api/hourly?days=7` | agregat horari (mitjana, mínim, màxim), fins a 92 dies |
 | `/api/heatmap?weeks=8` | ocupació mitjana per dia de la setmana i hora |
@@ -97,6 +98,8 @@ L'excepció és `/api/status`, que no es cacheja: les seves consultes ja estan a
 La cache és per centre de dades, així que amb visites repartides l'estalvi és gran però no exacte.
 
 L'altre límit és el de CPU: 10 ms per petició al pla gratuït. Una resposta que el supera no arriba a sortir del Worker: Cloudflare la talla amb l'error 1102 i el client rep un **503** amb el cos `error code: 1102`, no el 500 dels errors del Worker. Per veure-ho en directe, `npx wrangler tail --format json` mostra `"outcome": "exceededCpu"` i el `cpuTime` de cada petició.
+
+Hi van caure `/api/day` i `/data/AAAA-MM-DD.csv` quan no eren a la cache: es creava un `Intl.DateTimeFormat` per fila, uns 200 ms de CPU per a un dia sencer. Ara la data local es calcula amb un desplaçament d'UTC per hora (`localIso`), i `test/time.test.ts` comprova que no es torni a consultar `Intl` a cada fila. Així i tot, un dia sencer en format llarg (~860 KB) no va sobrat: per això el dashboard demana `/api/day/AAAA-MM-DD/series`, que es genera en un parell de mil·lisegons.
 
 El CSV d'un mes sencer no hi cap de cap manera: són ~130.000 files, i en una prova amb Node només interpretar el resultat de D1 ja costava uns 65 ms, i serialitzar-lo uns 60 més, abans de donar format a cap fila. Per això `/data/AAAA-MM.csv` no es genera al Worker. La GitHub Action que cada matinada desa el CSV del dia anterior a la branca `data` hi munta també el del mes, concatenant-ne els dies, i el Worker només el passa al client: no llegeix cap fila de D1 ni toca el contingut, que viatja comprimit de GitHub al client. La contrapartida és que el mes en curs arriba fins a l'última còpia (normalment ahir) i que un mes sense cap còpia respon 404. L'adreça de la còpia és la variable `DATA_MIRROR_URL` de `wrangler.jsonc`.
 
@@ -144,6 +147,7 @@ Les proves cobreixen les parts pures del Worker i no necessiten ni D1 ni xarxa: 
 - `test/time.test.ts`: hora local i horari d'estiu, incloent-hi l'hora que no existeix al març i la que es repeteix a l'octubre. Un error aquí desplaçaria `local_date`/`local_hour` sense fer fallar res.
 - `test/csv.test.ts`: la capçalera i l'ordre de les columnes del CSV, que són el contracte públic del dataset.
 - `test/series.test.ts`: la preparació de les sèries dels gràfics (`web/series.ts`). Una lectura aïllada que falta no talla la línia, però un forat de captura sí que s'hi veu; i els dies de canvi d'hora fan 23 i 25 hores a l'eix.
+- `test/day-series.test.ts`: l'agrupació per pàrquing de `/api/day/AAAA-MM-DD/series`, que és el que carrega el dashboard.
 
 A cada push, la CI fa `npm run check` (tipus, proves i build), executa les proves del scraper de Python i comprova que cap migració no faci operacions destructives.
 

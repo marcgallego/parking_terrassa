@@ -5,6 +5,8 @@
 
 import type {
   DayCount,
+  DaySeriesParking,
+  DaySeriesResponse,
   HeatmapResponse,
   HourlyRecord,
   LatestParking,
@@ -178,19 +180,37 @@ type ScrapeOutcome =
 
 const DOW_INDEX: Record<string, number> = { Mon: 0, Tue: 1, Wed: 2, Thu: 3, Fri: 4, Sat: 5, Sun: 6 };
 
+/**
+ * Un formatador per zona horària, creat un sol cop.
+ *
+ * Construir un `Intl.DateTimeFormat` és car, i les respostes en fan servir un
+ * per fila. Amb un formatador nou a cada crida, un dia sencer (4.320 files)
+ * costava uns 200 ms de CPU i el Worker superava el límit: Cloudflare el tallava
+ * amb l'error 1102, que arriba al client com un 503.
+ */
+const formatters = new Map<string, Intl.DateTimeFormat>();
+
+function formatterFor(tz: string): Intl.DateTimeFormat {
+  let fmt = formatters.get(tz);
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat("en-CA", {
+      timeZone: tz,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+      weekday: "short",
+    });
+    formatters.set(tz, fmt);
+  }
+  return fmt;
+}
+
 export function localParts(date: Date, tz: string): LocalParts {
-  const fmt = new Intl.DateTimeFormat("en-CA", {
-    timeZone: tz,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    weekday: "short",
-  });
   const p: Record<string, string> = {};
-  for (const part of fmt.formatToParts(date)) p[part.type] = part.value;
+  for (const part of formatterFor(tz).formatToParts(date)) p[part.type] = part.value;
   return {
     local_date: `${p.year}-${p.month}-${p.day}`,
     local_hour: Number(p.hour) % 24, // alguns runtimes retornen "24" a mitjanit
@@ -203,18 +223,48 @@ export function isoUtc(ts: number): string {
   return new Date(ts * 1000).toISOString().replace(".000Z", "Z");
 }
 
+/** Minuts que l'hora local de `tz` va per davant d'UTC a l'instant `ts` (segons Unix). */
+function utcOffsetMinutes(ts: number, tz: string): number {
+  const p = localParts(new Date(ts * 1000), tz);
+  const d = p.local_date;
+  const localMinutes =
+    Date.UTC(Number(d.slice(0, 4)), Number(d.slice(5, 7)) - 1, Number(d.slice(8, 10)), p.local_hour, p.local_minute) / 60_000;
+  return localMinutes - Math.floor(ts / 60);
+}
+
+/**
+ * Desplaçament d'UTC per zona i hora UTC. Els canvis d'horari cauen en punt (a
+ * Europe/Madrid, a la 01:00 UTC), de manera que es consulta `Intl` dues vegades
+ * per hora —a l'inici i al final— en lloc d'una per fila. Si no coincideixen
+ * (una zona que canvia a mitja hora), l'hora es marca amb `null` i es calcula
+ * instant a instant.
+ */
+const offsetsByZone = new Map<string, Map<number, number | null>>();
+/** Hores desades per zona abans de buidar la cache (uns dos anys i mig). */
+const OFFSET_CACHE_HOURS = 20_000;
+
+function cachedUtcOffsetMinutes(ts: number, tz: string): number {
+  let byHour = offsetsByZone.get(tz);
+  if (!byHour) offsetsByZone.set(tz, (byHour = new Map()));
+  const hour = Math.floor(ts / 3600) * 3600;
+  let off = byHour.get(hour);
+  if (off === undefined) {
+    const start = utcOffsetMinutes(hour, tz);
+    off = start === utcOffsetMinutes(hour + 3599, tz) ? start : null;
+    if (byHour.size >= OFFSET_CACHE_HOURS) byHour.clear();
+    byHour.set(hour, off);
+  }
+  return off ?? utcOffsetMinutes(ts, tz);
+}
+
+const pad2 = (n: number): string => String(n).padStart(2, "0");
+
 export function localIso(ts: number, tz: string): string {
-  const d = new Date(ts * 1000);
-  const p = localParts(d, tz);
-  const utcMinutes = d.getUTCHours() * 60 + d.getUTCMinutes();
-  const localMinutes = p.local_hour * 60 + p.local_minute;
-  let off = localMinutes - utcMinutes;
-  if (off > 720) off -= 1440;
-  if (off < -720) off += 1440;
-  const sign = off >= 0 ? "+" : "-";
+  const off = cachedUtcOffsetMinutes(ts, tz);
+  // Rellotge local expressat com si fos UTC: els getters UTC en donen els camps.
+  const d = new Date((Math.floor(ts / 60) + off) * 60_000);
   const a = Math.abs(off);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${p.local_date}T${pad(p.local_hour)}:${pad(p.local_minute)}:00${sign}${pad(Math.floor(a / 60))}:${pad(a % 60)}`;
+  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}T${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}:00${off >= 0 ? "+" : "-"}${pad2(Math.floor(a / 60))}:${pad2(a % 60)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -590,6 +640,23 @@ export function toCsv(records: OccupancyRecord[]): string {
   return out;
 }
 
+/**
+ * Agrupa les lectures d'un dia per pàrquing, en el format de
+ * `/api/day/AAAA-MM-DD/series`. No formata cap data: és la manera barata de
+ * servir el dia en curs, que el dashboard demana cada minut.
+ */
+export function toDaySeries(day: string, rows: readonly ReadingRow[]): DaySeriesResponse {
+  const byParking = new Map<number, DaySeriesParking>();
+  for (const r of rows) {
+    let s = byParking.get(r.parking_id);
+    if (!s) byParking.set(r.parking_id, (s = { parking_id: r.parking_id, parking_slug: r.slug, points: [] }));
+    s.points.push([r.ts, r.available, r.capacity]);
+  }
+  const parkings = [...byParking.values()].sort((a, b) => a.parking_id - b.parking_id);
+  for (const p of parkings) p.points.sort((a, b) => a[0] - b[0]);
+  return { day, parkings };
+}
+
 interface ResponseOpts {
   status?: number;
   maxAge?: number;
@@ -755,17 +822,28 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     });
   }
 
+  // /api/day/AAAA-MM-DD/series : el dia agrupat per pàrquing, per al dashboard
+  const seriesMatch = path.match(/^\/api\/day\/(\d{4}-\d{2}-\d{2})\/series$/);
+  if (seriesMatch) {
+    const day = seriesMatch[1] as string;
+    // Mateixa vida a la cache que el dia en format llarg. Una fallada de cache
+    // aquí és barata: ni dates formatades ni camps derivats, ~70 KB per dia.
+    const maxAge = isPast(day) ? 86_400 : 60;
+    return withCache(request, path, maxAge, async () =>
+      json(toDaySeries(day, await queryReadings(env, "r.local_date = ?1", [day])), { maxAge }),
+    );
+  }
+
   // /api/day/AAAA-MM-DD (json)  |  /data/AAAA-MM-DD.csv
   const dayMatch = path.match(/^\/api\/day\/(\d{4}-\d{2}-\d{2})$/) ?? path.match(/^\/data\/(\d{4}-\d{2}-\d{2})\.csv$/);
   if (dayMatch) {
     const day = dayMatch[1] as string;
     const asCsv = path.endsWith(".csv");
     const past = isPast(day);
-    // El dia en curs també es guarda a la cache, un minut: és la consulta que
-    // carrega el dashboard a cada visita i, sense cachejar-la, cada visitant
-    // llegia de D1 totes les files del dia. Amb un minut de vida, la despesa
-    // deixa de dependre de les visites (les captures són per minut, de manera
-    // que no s'hi perd frescor real).
+    // El dia en curs també es guarda a la cache, un minut, perquè la despesa de
+    // lectures no depengui de les visites (les captures són per minut, de
+    // manera que no s'hi perd frescor real). El dashboard ja no fa servir
+    // aquesta forma, sinó `/series`; aquesta queda per a qui descarregui dades.
     const maxAge = past ? 86_400 : 60;
     return withCache(request, path, maxAge, async () => {
       const recs = (await queryReadings(env, "r.local_date = ?1", [day])).map((r) => rowToRecord(r, tz));

@@ -8,6 +8,8 @@
 export type {
   CapacityChange,
   DayCount,
+  DaySeriesParking,
+  DaySeriesResponse,
   HeatmapCell,
   HeatmapResponse,
   HourlyRecord,
