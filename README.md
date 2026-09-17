@@ -59,6 +59,7 @@ Endpoints (CORS obert):
 | `/data/AAAA-MM-DD.csv` | un dia sencer |
 | `/data/AAAA-MM.csv` | un mes sencer |
 | `/api/day/AAAA-MM-DD` | un dia en JSON |
+| `/api/day/AAAA-MM-DD/series` | el mateix dia, agrupat per pàrquing i sense camps derivats: `{day, parkings: [{parking_id, parking_slug, points: [[segons Unix, lliures, capacitat], …]}]}`. Pesa unes deu vegades menys; és el que carrega el dashboard |
 | `/api/latest` | última lectura de cada pàrquing i sèrie de les últimes 3 h |
 | `/api/hourly?days=7` | agregat horari (mitjana, mínim, màxim), fins a 92 dies |
 | `/api/heatmap?weeks=8` | ocupació mitjana per dia de la setmana i hora |
@@ -93,6 +94,8 @@ La clau de la cache es construeix amb els paràmetres ja normalitzats i acotats,
 L'excepció és `/api/status`, que no es cacheja: les seves consultes ja estan acotades i és la superfície de vigilància, que convé sempre fresca. Només se'n cacheja `?totals=1`, l'única variant que recorre tota la taula.
 
 La cache és per centre de dades, així que amb visites repartides l'estalvi és gran però no exacte.
+
+L'altre límit que cal vigilar és el de CPU: 10 ms per petició al pla gratuït. Una resposta que el supera no arriba a sortir del Worker: Cloudflare la talla amb l'error 1102 i el client rep un **503** amb el cos `error code: 1102` (no el 500 dels errors del Worker, ni cap JSON). Passava amb `/api/day` i `/data/AAAA-MM-DD.csv` quan no eren a la cache, perquè es creava un formatador de dates per fila (~200 ms per a un dia sencer). Ara la data local es calcula amb un desplaçament d'UTC per hora (`localIso`), i `test/time.test.ts` comprova que no es torni a consultar `Intl` a cada fila. Així i tot, un dia sencer en format llarg (~860 KB) no va sobrat; per això el dashboard demana `/api/day/AAAA-MM-DD/series`, que es genera en un parell de mil·lisegons. El CSV d'un mes sencer (~130.000 files) és massa gran per a aquest límit fins i tot així. Per veure-ho en directe: `npm run tail` mostra `"outcome": "exceededCpu"` i el `cpuTime` de cada petició.
 
 Si tot i així s'esgotessin les lectures, la captura continuaria: només escriu. El que s'aturaria fins a mitjanit UTC és el dashboard, l'API i l'agregat horari.
 

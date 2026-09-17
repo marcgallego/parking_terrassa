@@ -1,6 +1,6 @@
 /* Dashboard d'ocupació dels pàrquings Saba de Terrassa. Sense dependències. */
 import { getJson } from "./api";
-import type { DayCount, DayRecord, HeatmapResponse, HourlyRecord, LatestResponse, SantRocResponse, Slug } from "./api";
+import type { DayCount, DaySeriesParking, DaySeriesResponse, HeatmapResponse, HourlyRecord, LatestResponse, SantRocResponse, Slug } from "./api";
 
 const ORDER: readonly Slug[] = ["placa-vella", "ajuntament-mercat", "dr-robert"];
 const NAMES: Record<Slug, string> = { "placa-vella": "Plaça Vella", "ajuntament-mercat": "Ajuntament-Mercat", "dr-robert": "Dr. Robert" };
@@ -235,36 +235,118 @@ function tableHtml(head: string[], rows: string[][]): string {
   return `<table><thead><tr>${th}</tr></thead><tbody>${tr}</tbody></table>`;
 }
 
-async function loadRange(range: Range): Promise<void> {
+// ----- dades d'avui ----------------------------------------------------------
+type SeriesPoint = DaySeriesParking["points"][number];
+interface Loaded<T> { data: T; at: number }
+
+/**
+ * Última sèrie d'avui carregada. La comparteixen el gràfic d'ocupació i el
+ * panell del Portal de Sant Roc: cada refresc fa una sola petició, i si falla,
+ * tots dos es queden amb aquestes dades (i ho diuen) en lloc de buidar-se.
+ */
+let today: Loaded<DaySeriesResponse> | null = null;
+let todayFailed = false;
+let todayRequest: Promise<void> | null = null;
+
+function refreshToday(): Promise<void> {
+  todayRequest ??= (async () => {
+    try {
+      today = { data: await getJson<DaySeriesResponse>(`/api/day/${localToday()}/series`), at: Date.now() };
+      todayFailed = false;
+    } catch {
+      todayFailed = true;
+    }
+    if (range === "today") renderRangeToday();
+    renderSantRoc();
+  })().finally(() => { todayRequest = null; });
+  return todayRequest;
+}
+
+/** La sèrie carregada, només si és de debò d'avui: passada la mitjanit pot ser la d'ahir. */
+const currentToday = (): Loaded<DaySeriesResponse> | null => (today?.data.day === localToday() ? today : null);
+
+const occupancyPct = (capacity: number, available: number): number => Math.round((1000 * (capacity - available)) / capacity) / 10;
+const hhmm = (t: number): string => `${pad2(Math.floor(t / 60))}:${pad2(t % 60)}`;
+
+/** Minut del dia en hora local. L'hora local es consulta un cop per hora UTC: els canvis d'horari cauen en punt. */
+const fmtHm = new Intl.DateTimeFormat("en-GB", { timeZone: TZ, hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+const hourStartMinute = new Map<number, number>();
+function localMinuteOfDay(ts: number): number {
+  const hour = ts - (ts % 3600);
+  let base = hourStartMinute.get(hour);
+  if (base === undefined) {
+    const [h = "0", m = "0"] = fmtHm.format(new Date(hour * 1000)).split(":");
+    base = Number(h) * 60 + Number(m);
+    hourStartMinute.set(hour, base);
+  }
+  return (base + Math.floor((ts - hour) / 60)) % 1440;
+}
+
+/** Una font de dades d'un panell: si l'última petició ha fallat, i de quan són les dades que es mostren. */
+interface Source { failed: boolean; at: number | null }
+function staleNotice(sources: Source[]): string | null {
+  const failed = sources.filter((s) => s.failed);
+  if (!failed.length) return null;
+  const ats = failed.map((s) => s.at).filter((a): a is number => a !== null);
+  if (ats.length < failed.length) return "No s'han pogut carregar les dades. Es tornarà a provar d'aquí a un minut.";
+  return `No s'ha pogut actualitzar: es mostren les dades de les ${fmtTime.format(new Date(Math.min(...ats)))}. Es tornarà a provar d'aquí a un minut.`;
+}
+function setNotice(el: HTMLElement, text: string | null): void {
+  el.textContent = text ?? "";
+  el.hidden = text === null;
+}
+
+function renderRangeToday(): void {
   const el = $("#line-chart"), tbl = $("#line-table");
-  if (range === "today") {
-    const rows = await getJson<DayRecord[]>(`/api/day/${localToday()}`);
-    const minuteOf = (r: DayRecord): number => Number(r.timestamp_local.slice(11, 13)) * 60 + Number(r.timestamp_local.slice(14, 16));
-    const series = ORDER.map((slug) => bySlug(slug, rows.filter((r) => r.parking_slug === slug).map((r) => ({ x: minuteOf(r), y: r.occupancy_pct, label: `${r.available} lliures` }))));
-    lineChart(el, series, {
-      fmtY: (y) => `${pct1(y)} %`,
-      xDomain: [0, 1440],
-      xTicks: [0, 180, 360, 540, 720, 900, 1080, 1260, 1440],
-      fmtTick: (t) => `${pad2(Math.floor(t / 60))}:00`,
-      fmtX: (t) => `${fmtDate.format(new Date())} · ${pad2(Math.floor(t / 60))}:${pad2(t % 60)}`,
-      empty: "Encara no hi ha lectures d'avui",
-    });
-    const byMin = new Map<string, Partial<Record<Slug, DayRecord>>>();
-    for (const r of rows) {
-      const k = r.timestamp_local.slice(11, 16);
+  const cur = currentToday();
+  const parkings = cur?.data.parkings ?? [];
+  const pointsOf = new Map(parkings.map((p) => [p.parking_slug, p.points]));
+  const series = ORDER.map((slug) => bySlug(slug, (pointsOf.get(slug) ?? []).map(([ts, available, capacity]) => ({ x: localMinuteOfDay(ts), y: occupancyPct(capacity, available), label: `${available} lliures` }))));
+  lineChart(el, series, {
+    fmtY: (y) => `${pct1(y)} %`,
+    xDomain: [0, 1440],
+    xTicks: [0, 180, 360, 540, 720, 900, 1080, 1260, 1440],
+    fmtTick: (t) => `${pad2(Math.floor(t / 60))}:00`,
+    fmtX: (t) => `${fmtDate.format(new Date())} · ${hhmm(t)}`,
+    empty: "Encara no hi ha lectures d'avui",
+  });
+  const byMin = new Map<number, Partial<Record<Slug, SeriesPoint>>>();
+  for (const p of parkings) {
+    for (const pt of p.points) {
+      const k = localMinuteOfDay(pt[0]);
       const e = byMin.get(k) ?? {};
-      e[r.parking_slug] = r;
+      e[p.parking_slug] = pt;
       byMin.set(k, e);
     }
-    const keys = [...byMin.keys()].sort();
-    const step = Math.max(1, Math.floor(keys.length / 96)); // màxim ~96 files (cada 15 min)
-    tbl.innerHTML = tableHtml(
-      ["hora", ...ORDER.map((s) => `${NAMES[s]} (% / lliures)`)],
-      keys.filter((_, i) => i % step === 0).map((k) => [k, ...ORDER.map((s) => { const r = byMin.get(k)?.[s]; return r ? `${pct1(r.occupancy_pct)} % / ${r.available}` : "–"; })]),
-    );
+  }
+  const keys = [...byMin.keys()].sort((a, b) => a - b);
+  const step = Math.max(1, Math.floor(keys.length / 96)); // màxim ~96 files (cada 15 min)
+  tbl.innerHTML = tableHtml(
+    ["hora", ...ORDER.map((s) => `${NAMES[s]} (% / lliures)`)],
+    keys.filter((_, i) => i % step === 0).map((k) => [hhmm(k), ...ORDER.map((s) => { const pt = byMin.get(k)?.[s]; return pt ? `${pct1(occupancyPct(pt[2], pt[1]))} % / ${pt[1]}` : "–"; })]),
+  );
+  setNotice($("#line-notice"), staleNotice([{ failed: todayFailed, at: cur?.at ?? null }]));
+}
+
+async function loadRange(r: Range): Promise<void> {
+  const el = $("#line-chart"), tbl = $("#line-table");
+  if (r === "today") {
+    // Les dades d'avui es refresquen soles cada minut; aquí només cal dibuixar-les.
+    if (today) renderRangeToday(); else await refreshToday();
   } else {
-    const days = Number(range);
-    const rows = await getJson<HourlyRecord[]>(`/api/hourly?days=${days}`);
+    const days = Number(r);
+    setNotice($("#line-notice"), null);
+    let rows: HourlyRecord[];
+    try {
+      rows = await getJson<HourlyRecord[]>(`/api/hourly?days=${days}`);
+    } catch {
+      if (range !== r) return;
+      lineChart(el, [], { xTicks: [], fmtTick: String, fmtX: String, empty: "No s'han pogut carregar les dades d'aquest interval. Torneu-ho a provar d'aquí a una estona." });
+      tbl.innerHTML = "";
+      return;
+    }
+    // Mentre arribava la resposta, l'usuari pot haver triat un altre interval.
+    if (range !== r) return;
     const series = ORDER.map((slug) => bySlug(slug, rows.filter((r) => r.parking_slug === slug).map((r) => ({ x: Date.parse(r.hour_utc), y: r.avg_occupancy_pct, label: `mitjana ${Math.round(r.avg_available)} lliures` }))));
     const now = Date.now(), stepDays = days > 10 ? 5 : 1, ticks: number[] = [];
     for (let i = days; i >= 0; i -= stepDays) ticks.push(Date.parse(`${new Date(now - i * 86_400_000).toISOString().slice(0, 10)}T00:00:00Z`));
@@ -320,31 +402,63 @@ function statHtml(value: string, unit: string, label: string, sub = "", bad = fa
   return `<div class="stat${bad ? " is-bad" : ""}"><div class="v">${value}${unit ? `<small>${esc(unit)}</small>` : ""}</div><div class="l">${esc(label)}</div>${sub ? `<div class="s">${esc(sub)}</div>` : ""}</div>`;
 }
 
-async function loadSantRoc(days: SrDays, threshold: SrThreshold): Promise<void> {
-  const [sr, todayRows] = await Promise.all([
-    getJson<SantRocResponse>(`/api/santroc?days=${days}&threshold=${threshold}`),
-    getJson<DayRecord[]>(`/api/day/${localToday()}`),
-  ]);
+/** Últim resum del període carregat, amb els filtres amb què es va demanar. */
+let sr: (Loaded<SantRocResponse> & { key: string }) | null = null;
+let srFailed = false;
+const srKey = (): string => `${srDays}|${srThreshold}`;
+
+async function refreshSantRoc(): Promise<void> {
+  const key = srKey();
+  try {
+    const data = await getJson<SantRocResponse>(`/api/santroc?days=${srDays}&threshold=${srThreshold}`);
+    if (key !== srKey()) return; // mentrestant s'ha canviat el filtre, i ja n'hi ha una altra petició en camí
+    sr = { data, at: Date.now(), key };
+    srFailed = false;
+  } catch {
+    if (key !== srKey()) return;
+    srFailed = true;
+  }
+  renderSantRoc();
+}
+
+/**
+ * Dibuixa el panell amb les últimes dades bones de cada font. Avui i el resum
+ * del període es carreguen per separat: si un falla, l'altre es continua
+ * mostrant i posant al dia.
+ */
+function renderSantRoc(): void {
+  const threshold = srThreshold;
+  const cur = currentToday();
+  const period = sr?.key === srKey() ? sr : null;
   const names = SANT_ROC.map((s) => NAMES[s]).join(" + ");
+  setNotice($("#sr-notice"), staleNotice([
+    { failed: todayFailed, at: cur?.at ?? null },
+    { failed: srFailed, at: period?.at ?? null },
+  ]));
 
   // Avui, minut a minut: suma de lliures quan hi ha lectura dels dos pàrquings
-  const byMinute = new Map<number, Partial<Record<Slug, DayRecord>>>();
-  for (const r of todayRows) {
-    if (!SANT_ROC.includes(r.parking_slug)) continue;
-    const k = Number(r.timestamp_local.slice(11, 13)) * 60 + Number(r.timestamp_local.slice(14, 16));
-    const e = byMinute.get(k) ?? {};
-    e[r.parking_slug] = r;
-    byMinute.set(k, e);
+  const byMinute = new Map<number, Partial<Record<Slug, SeriesPoint>>>();
+  for (const p of cur?.data.parkings ?? []) {
+    if (!SANT_ROC.includes(p.parking_slug)) continue;
+    for (const pt of p.points) {
+      const k = localMinuteOfDay(pt[0]);
+      const e = byMinute.get(k) ?? {};
+      e[p.parking_slug] = pt;
+      byMinute.set(k, e);
+    }
   }
   const points: Point[] = [];
+  // Capacitat de l'última lectura d'avui; si encara no n'hi ha, la de la fitxa.
+  let capacity = period?.data.capacity ?? 0;
   for (const [k, e] of [...byMinute.entries()].sort((a, b) => a[0] - b[0])) {
     const parts = SANT_ROC.map((s) => e[s]);
-    if (parts.every((p): p is DayRecord => p !== undefined)) {
-      points.push({ x: k, y: parts.reduce((a, p) => a + p.available, 0), label: parts.map((p) => `${NAMES[p.parking_slug]} ${p.available}`).join(", ") });
+    if (parts.every((p): p is SeriesPoint => p !== undefined)) {
+      points.push({ x: k, y: parts.reduce((a, p) => a + p[1], 0), label: SANT_ROC.map((s) => `${NAMES[s]} ${e[s]?.[1]}`).join(", ") });
+      capacity = parts.reduce((a, p) => a + p[2], 0);
     }
   }
   lineChart($("#sr-today"), [{ key: "sr", name: "places lliures", color: "var(--series-1)", points }], {
-    yMax: sr.capacity || 500,
+    yMax: capacity || 500,
     fmtY: (y) => `${Math.round(y)} lliures`,
     refLine: { y: threshold, label: `llindar: ${threshold} lliures` },
     xDomain: [0, 1440],
@@ -357,16 +471,31 @@ async function loadSantRoc(days: SrDays, threshold: SrThreshold): Promise<void> 
   // Estadístiques
   const now = points[points.length - 1];
   const todayMin = points.reduce<Point | null>((acc, p) => (acc === null || p.y < acc.y ? p : acc), null);
+  const todayStats = [
+    now ? statHtml(String(now.y), `de ${capacity}`, "places lliures ara mateix", names, now.y < threshold) : statHtml("–", "", "places lliures ara mateix", "sense lectura d'avui"),
+    todayMin ? statHtml(String(todayMin.y), "", "mínim d'avui", `a les ${hhmm(todayMin.x)}`, todayMin.y < threshold) : statHtml("–", "", "mínim d'avui"),
+  ];
+  if (!period) {
+    // Encara no hi ha el resum d'aquests filtres, o no s'ha pogut carregar: només es posa al dia el que depèn d'avui.
+    $("#sr-stats").innerHTML = [...todayStats, statHtml("–", "", `dies amb menys de ${threshold} lliures`), statHtml("–", "%", "del temps sota el llindar"), statHtml("–", "", "mínim del període")].join("");
+    if (srFailed) {
+      // Res del període anterior: correspon a uns altres filtres.
+      const daily = $("#sr-daily");
+      redraws.delete(daily);
+      daily.innerHTML = "";
+      $("#sr-daily-hint").textContent = "";
+      $("#sr-table").innerHTML = "";
+    }
+    return;
+  }
   // El període només compta dies complets; el dia d'avui té les seves pròpies estadístiques.
-  const completeDays = sr.days.filter((d) => d.day !== localToday());
+  const completeDays = period.data.days.filter((d) => d.day !== localToday());
   const totalMinutes = completeDays.reduce((a, d) => a + d.minutes, 0);
   const belowMinutes = completeDays.reduce((a, d) => a + d.minutes_below, 0);
   const daysBelow = completeDays.filter((d) => d.minutes_below > 0).length;
   const worst = completeDays.reduce<SantRocResponse["days"][number] | null>((acc, d) => (acc === null || d.min_free < acc.min_free ? d : acc), null);
-  const fmtMinute = (t: number): string => `${pad2(Math.floor(t / 60))}:${pad2(t % 60)}`;
   $("#sr-stats").innerHTML = [
-    now ? statHtml(String(now.y), `de ${sr.capacity}`, "places lliures ara mateix", names, now.y < threshold) : statHtml("–", "", "places lliures ara mateix", "sense lectura d'avui"),
-    todayMin ? statHtml(String(todayMin.y), "", "mínim d'avui", `a les ${fmtMinute(todayMin.x)}`, todayMin.y < threshold) : statHtml("–", "", "mínim d'avui"),
+    ...todayStats,
     statHtml(String(daysBelow), `de ${completeDays.length} dies`, `dies amb menys de ${threshold} lliures`, completeDays.length ? `${pct1((100 * daysBelow) / completeDays.length)} % dels dies complets` : "encara cap dia complet", daysBelow > 0),
     statHtml(totalMinutes ? pct1((100 * belowMinutes) / totalMinutes) : "–", "%", "del temps sota el llindar", totalMinutes ? `${belowMinutes.toLocaleString("ca")} de ${totalMinutes.toLocaleString("ca")} minuts` : "", belowMinutes > 0),
     worst ? statHtml(String(worst.min_free), "lliures", "mínim del període", `${fmtDay.format(new Date(worst.min_at_utc))} a les ${fmtTime.format(new Date(worst.min_at_utc))}`, worst.min_free < threshold) : statHtml("–", "", "mínim del període"),
@@ -468,8 +597,14 @@ const logErr = (e: unknown): void => console.error(e);
 
 for (const b of rangeButtons) b.addEventListener("click", () => { if (isRange(b.dataset.range ?? null)) { range = b.dataset.range as Range; syncChips(); loadRange(range).catch(logErr); } });
 for (const b of weekButtons) b.addEventListener("click", () => { const w = Number(b.dataset.weeks); if (isWeeks(w)) { weeks = w; syncChips(); loadHeat(weeks).catch(logErr); } });
-for (const b of srDayButtons) b.addEventListener("click", () => { const v = Number(b.dataset.srDays); if (isSrDays(v)) { srDays = v; syncChips(); loadSantRoc(srDays, srThreshold).catch(logErr); } });
-for (const b of srThresholdButtons) b.addEventListener("click", () => { const v = Number(b.dataset.srThreshold); if (isSrThreshold(v)) { srThreshold = v; syncChips(); loadSantRoc(srDays, srThreshold).catch(logErr); } });
+/** En canviar els filtres, el resum anterior ja no val i el seu error tampoc. */
+function changeSantRocFilters(): void {
+  srFailed = false;
+  syncChips();
+  void refreshSantRoc();
+}
+for (const b of srDayButtons) b.addEventListener("click", () => { const v = Number(b.dataset.srDays); if (isSrDays(v)) { srDays = v; changeSantRocFilters(); } });
+for (const b of srThresholdButtons) b.addEventListener("click", () => { const v = Number(b.dataset.srThreshold); if (isSrThreshold(v)) { srThreshold = v; changeSantRocFilters(); } });
 
 async function refreshLatest(): Promise<void> {
   try { renderKpi(await getJson<LatestResponse>("/api/latest")); } catch (e) { $("#status-text").textContent = "No s'ha pogut carregar l'estat"; logErr(e); }
@@ -483,12 +618,15 @@ refreshRamp();
 syncChips();
 renderLegend($("#line-legend"));
 void refreshLatest();
-loadSantRoc(srDays, srThreshold).catch(logErr);
-loadRange(range).catch(logErr);
+// Avui es demana un sol cop i n'hi ha prou per al gràfic d'ocupació i per al panell del Portal de Sant Roc.
+void refreshToday();
+void refreshSantRoc();
+if (range !== "today") loadRange(range).catch(logErr);
 loadHeat(weeks).catch(logErr);
 loadDownloads().catch(logErr);
+// Els errors dels refrescos no es propaguen: cada panell es queda amb les últimes dades bones i ho indica.
 window.setInterval(() => {
   void refreshLatest();
-  loadSantRoc(srDays, srThreshold).catch(logErr);
-  if (range === "today") loadRange("today").catch(logErr);
+  void refreshToday();
+  void refreshSantRoc();
 }, 60_000);

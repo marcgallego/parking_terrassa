@@ -69,3 +69,59 @@ test("LOCAL_TZ pot ser una zona darrere d'UTC", () => {
   assert.equal(localIso(secs("2026-09-11T02:30:00Z"), "America/New_York"), "2026-09-10T22:30:00-04:00");
   assert.equal(localIso(secs("2026-01-15T02:30:00Z"), "America/New_York"), "2026-01-14T21:30:00-05:00");
 });
+
+/**
+ * Referència sense cap cache: un formatador nou per instant, i el desplaçament
+ * calculat a partir de la data local sencera. És lenta, que és justament el que
+ * `localIso` evita; aquí serveix per comprovar que evitar-ho no canvia res.
+ */
+function referenceLocalIso(ts: number, tz: string): string {
+  const fmt = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  const p: Record<string, string> = {};
+  for (const part of fmt.formatToParts(new Date(ts * 1000))) p[part.type] = part.value;
+  const hour = Number(p.hour) % 24;
+  const off = Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day), hour, Number(p.minute)) / 60_000 - Math.floor(ts / 60);
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  const a = Math.abs(off);
+  return `${p.year}-${p.month}-${p.day}T${pad(hour)}:${p.minute}:00${off >= 0 ? "+" : "-"}${pad(Math.floor(a / 60))}:${pad(a % 60)}`;
+}
+
+test("localIso coincideix minut a minut amb Intl, també els dies de canvi d'hora", () => {
+  // La cache de `localIso` guarda un desplaçament per hora UTC. Aquests casos
+  // cobreixen els canvis en punt (Madrid, Nova York), una zona de mitja hora
+  // (Calcuta), una que canvia 30 minuts a mitja hora UTC (Lord Howe) i una més
+  // enllà de +12 h (Kiritimati).
+  const cases: [string, string][] = [
+    ["Europe/Madrid", "2026-03-29"],
+    ["Europe/Madrid", "2026-10-25"],
+    ["America/New_York", "2026-11-01"],
+    ["Asia/Kolkata", "2026-09-12"],
+    ["Australia/Lord_Howe", "2026-10-04"],
+    ["Pacific/Kiritimati", "2026-09-12"],
+  ];
+  for (const [tz, day] of cases) {
+    const from = secs(`${day}T00:00:00Z`) - 12 * 3600;
+    for (let ts = from; ts < from + 36 * 3600; ts += 60) {
+      assert.equal(localIso(ts, tz), referenceLocalIso(ts, tz), `${tz} ${isoUtc(ts)}`);
+    }
+  }
+});
+
+test("un dia sencer no consulta Intl a cada lectura", () => {
+  // Consultar-lo (i crear-ne un formatador) per fila feia que /api/day
+  // gastés uns 200 ms de CPU i el Worker caigués per l'error 1102 (503).
+  const proto = Intl.DateTimeFormat.prototype;
+  const original = proto.formatToParts;
+  let calls = 0;
+  proto.formatToParts = function (this: Intl.DateTimeFormat, date?: Date | number) {
+    calls++;
+    return original.call(this, date);
+  };
+  try {
+    const from = secs("2026-06-01T22:00:00Z");
+    for (let i = 0; i < 3 * 1440; i++) localIso(from + Math.floor(i / 3) * 60, TZ);
+  } finally {
+    proto.formatToParts = original;
+  }
+  assert.ok(calls <= 2 * 24, `${calls} consultes a Intl per a les 4.320 lectures d'un dia`);
+});

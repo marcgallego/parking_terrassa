@@ -20,6 +20,24 @@ export interface OccupancyRecord {
   occupancy_pct: number;
 }
 
+/** Un pàrquing dins de `/api/day/AAAA-MM-DD/series`. */
+export interface DaySeriesParking {
+  parking_id: number;
+  parking_slug: Slug;
+  /** [segons Unix (UTC), places lliures, capacitat], un per minut amb lectura, en ordre de temps */
+  points: [number, number, number][];
+}
+
+/**
+ * `/api/day/AAAA-MM-DD/series`: les mateixes lectures que `/api/day/AAAA-MM-DD`,
+ * agrupades per pàrquing i sense camps derivats. Pesa unes deu vegades menys
+ * i és el que carrega el dashboard.
+ */
+export interface DaySeriesResponse {
+  day: string;
+  parkings: DaySeriesParking[];
+}
+
 /** Fitxa d'un pàrquing: `/api/parkings`. */
 export interface ParkingInfo {
   id: number;
