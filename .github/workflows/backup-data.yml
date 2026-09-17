@@ -1,5 +1,6 @@
 # Còpia diària de les dades fora de Cloudflare: cada matinada baixa el CSV
-# del dia anterior i el desa a la branca `data` d'aquest repositori.
+# del dia anterior, el desa a la branca `data` d'aquest repositori i hi torna a
+# muntar el CSV del mes, que és el que serveix /data/AAAA-MM.csv.
 name: Còpia diària de les dades
 
 on:
@@ -27,12 +28,45 @@ jobs:
           set -euo pipefail
           day="${{ github.event.inputs.day }}"
           [ -n "$day" ] || day=$(TZ=Europe/Madrid date -d "yesterday" +%F)
+          [[ "$day" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo "::error::dia no vàlid: $day"; exit 1; }
           dir="data/${day:0:4}"
           mkdir -p "$dir"
           curl -fsS --retry 3 "https://parking.terrassa.workers.dev/data/$day.csv" -o "$dir/$day.csv"
           lines=$(wc -l < "$dir/$day.csv")
           echo "$day: $lines línies"
           if [ "$lines" -le 1 ]; then echo "El CSV no té dades"; exit 1; fi
+          echo "DAY=$day" >> "$GITHUB_ENV"
+
+      # El Worker no pot generar el CSV d'un mes sencer (~130.000 files): supera
+      # els 10 ms de CPU del pla gratuït. Es munta aquí amb els CSV diaris, i
+      # /data/AAAA-MM.csv el passa tal com és.
+      - name: Munta el CSV del mes
+        run: |
+          set -euo pipefail
+          month="${DAY:0:7}"
+          dir="data/${DAY:0:4}"
+          # Capçalera una sola vegada i els dies en ordre. El patró `-??` deixa
+          # fora el mateix fitxer del mes (AAAA-MM.csv).
+          header=$(head -n 1 "$dir/$DAY.csv")
+          files=("$dir/$month"-??.csv)
+          tmp=$(mktemp)
+          printf '%s\n' "$header" > "$tmp"
+          for f in "${files[@]}"; do
+            if [ "$(head -n 1 "$f")" != "$header" ]; then
+              echo "::error::$f té una capçalera diferent de la de $DAY.csv"
+              exit 1
+            fi
+            tail -n +2 "$f" >> "$tmp"
+          done
+          mv "$tmp" "$dir/$month.csv"
+          echo "$month: ${#files[@]} dies, $(wc -l < "$dir/$month.csv") línies"
+          # Un dia sense còpia deixaria un forat al mes sense que res fallés.
+          d=$(basename "${files[0]}" .csv)
+          last=$(basename "${files[${#files[@]}-1]}" .csv)
+          while [ "$d" != "$last" ]; do
+            [ -f "$dir/$d.csv" ] || echo "::warning::falta $d.csv: $month.csv hi tindrà un forat"
+            d=$(date -u -d "$d + 1 day" +%F)
+          done
 
       - name: Commit i push
         run: |

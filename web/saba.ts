@@ -236,9 +236,12 @@ async function loadDownloads(): Promise<void> {
   const days = await getJson<DayCount[]>("/api/days");
   const today = localToday();
   $<HTMLAnchorElement>("#api-today").href = `/api/day/${today}`;
-  const months = [...new Set(days.map((d) => d.day.slice(0, 7)))];
+  // El CSV d'un mes el munta la còpia de cada matinada a partir dels dies tancats: el del mes en
+  // curs arriba fins a ahir, i no existeix fins que el mes no en té cap.
+  const thisMonth = today.slice(0, 7);
+  const months = [...new Set(days.filter((d) => d.day < today).map((d) => d.day.slice(0, 7)))];
   const items = [`<li><a href="/data/${today}.csv" download><code>${today}.csv</code></a> avui (s'actualitza cada minut)</li>`];
-  for (const mth of months) items.push(`<li><a href="/data/${mth}.csv" download><code>${mth}.csv</code></a> mes sencer</li>`);
+  for (const mth of months) items.push(`<li><a href="/data/${mth}.csv" download><code>${mth}.csv</code></a> ${mth === thisMonth ? "mes en curs, fins a ahir" : "mes sencer"}</li>`);
   for (const d of days.filter((d) => d.day !== today).slice(0, 7)) items.push(`<li><a href="/data/${d.day}.csv" download><code>${d.day}.csv</code></a> ${d.rows.toLocaleString("ca")} files</li>`);
   if (days.length > 8) items.push(`<li class="hint">…i ${days.length - 8} dies més; vegeu <a href="/api/days"><code>/api/days</code></a>.</li>`);
   $("#downloads").innerHTML = items.join("");

@@ -30,15 +30,6 @@
   </header>
 
   <main>
-    <div class="toolbar">
-      <div class="filters" role="group" aria-label="Període"><span class="flabel">període</span><button class="chip"
-          data-srdays="30">30 dies</button><button class="chip" data-srdays="90">90 dies</button><button class="chip"
-          data-srdays="365">1 any</button></div>
-      <div class="filters" role="group" aria-label="Llindar de places lliures"><span
-          class="flabel">llindar</span><button class="chip" data-threshold="10">10</button><button class="chip"
-          data-threshold="25">25</button><button class="chip" data-threshold="50">50 lliures</button></div>
-    </div>
-
     <p class="notice" id="notice" role="status" hidden></p>
 
     <section class="stats" id="sr-stats" aria-label="Resum"></section>
@@ -47,8 +38,8 @@
       <div class="card-head">
         <div>
           <h2>Avui, minut a minut</h2>
-          <p class="hint">Places lliures entre tots dos pàrquings i de cadascun. La línia vermella és el llindar, i es
-            compara amb el total.</p>
+          <p class="hint">Places lliures entre tots dos pàrquings i de cadascun. La línia vermella marca el llindar de
+            25 places lliures, que es compara amb el total.</p>
         </div>
       </div>
       <div class="legend-static"><span><i class="is-total"

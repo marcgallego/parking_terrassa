@@ -10,7 +10,7 @@
   --text-secondary: #52514e;
   --text-muted: #8a8985;
   --series-1: #2a78d6;   /* Plaça Vella */
-  --series-2: #eb6834;   /* Ajuntament-Mercat */
+  --series-2: #c08600;   /* Ajuntament-Mercat */
   --series-3: #1baf7a;   /* Dr. Robert */
   --seq-lo: #cde2fb;
   --seq-hi: #0d366b;
@@ -31,7 +31,7 @@
     --text-secondary: #c3c2b7;
     --text-muted: #8f8e88;
     --series-1: #3987e5;
-    --series-2: #d95926;
+    --series-2: #e0a838;
     --series-3: #199e70;
     --seq-lo: #1c3556;
     --seq-hi: #9ec5f4;
@@ -47,7 +47,7 @@
   color-scheme: dark;
   --surface-0: #111110; --surface-1: #1a1a19; --line: #2e2e2c; --grid: #262624;
   --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #8f8e88;
-  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
+  --series-1: #3987e5; --series-2: #e0a838; --series-3: #199e70;
   --seq-lo: #1c3556; --seq-hi: #9ec5f4; --meter-track: #26313f;
   --good: #35b535; --bad: #e66767; --chip-on: #ffffff; --chip-on-text: #0b0b0b;
 }
@@ -113,8 +113,6 @@ footer { color: var(--text-muted); font-size: 0.85rem; margin-top: 24px; padding
 .chip { border: 1px solid var(--line); background: transparent; color: var(--text-primary); border-radius: 999px; padding: 5px 12px; font: inherit; font-size: 0.85rem; cursor: pointer; }
 .chip:hover { border-color: var(--text-muted); }
 .chip.is-on { background: var(--chip-on); color: var(--chip-on-text); border-color: var(--chip-on); }
-.flabel { font-size: 0.8rem; color: var(--text-muted); margin-right: 2px; }
-.toolbar { display: flex; flex-wrap: wrap; gap: 10px 28px; align-items: center; margin-bottom: 12px; }
 .hint { color: var(--text-muted); font-size: 0.85rem; margin: 0 0 10px; }
 .notice { color: var(--bad); font-size: 0.85rem; margin: 0 0 10px; }
 

@@ -17,8 +17,10 @@ Font: fitxes públiques de [saba.es](https://www.saba.es/ca/parking-terrassa), q
 ```
 Cron "* * * * *"  ─► Worker: descarrega les 3 fitxes, en parseja l'ocupació ─► D1 (taula readings)
 Cron "7 * * * *"  ─► Worker: agrega les últimes hores ─► D1 (taula hourly)
-HTTP /api/*, /data/*  ─► Worker: JSON i CSV des de D1 (cache a la vora per a dies tancats)
+HTTP /api/*, /data/*  ─► Worker: JSON i CSV des de D1 (cache a la vora)
+HTTP /data/AAAA-MM.csv ─► Worker: passa el CSV mensual de la branca data, sense llegir D1
 HTTP /               ─► Assets estàtics: dashboard (public/)
+GitHub Action 01:20 UTC ─► branca data: CSV del dia anterior i CSV del mes, concatenat
 ```
 
 Tot el codi és TypeScript en mode estricte.
@@ -57,7 +59,7 @@ Endpoints (CORS obert):
 | ruta | contingut |
 |---|---|
 | `/data/AAAA-MM-DD.csv` | un dia sencer |
-| `/data/AAAA-MM.csv` | un mes sencer |
+| `/data/AAAA-MM.csv` | un mes sencer. Es munta cada matinada a partir dels CSV diaris (vegeu [el límit de CPU](#desplegament-a-cloudflare)), així que el del mes en curs arriba fins a l'última còpia, normalment ahir; el dia d'avui és a `/data/AAAA-MM-DD.csv` |
 | `/api/day/AAAA-MM-DD` | un dia en JSON |
 | `/api/day/AAAA-MM-DD/series` | el mateix dia, agrupat per pàrquing i sense camps derivats: `{day, parkings: [{parking_id, parking_slug, points: [[segons Unix, lliures, capacitat], …]}]}`. Pesa unes deu vegades menys; és el que carrega el dashboard |
 | `/api/latest` | última lectura de cada pàrquing i sèrie de les últimes 3 h |
@@ -87,7 +89,7 @@ Al cap d'un minut, `https://parking.<subdomini>.workers.dev/api/status` ha de mo
 
 Consum aproximat en el pla gratuït: 1.440 invocacions de cron i 4.320 files escrites al dia (límits: 100.000 peticions i 100.000 files escrites).
 
-El límit que costa més de respectar és el de lectures: 5 milions de files al dia, i compta per compte, no per base de dades. La despesa està desacoblada del nombre de visites: **totes** les adreces es guarden a la cache de la vora, amb un temps de vida segons el que canvien (un dia per als dies i mesos tancats, un minut per al dia en curs, cinc per al mes en curs, mig minut per a `/api/latest`). Així, una consulta llegeix de D1 un cop per període i no un cop per visitant. El llistat de dies (`/api/days`) es compta a més des de `hourly`, unes seixanta vegades més petita que `readings`.
+El límit que costa més de respectar és el de lectures: 5 milions de files al dia, i compta per compte, no per base de dades. La despesa està desacoblada del nombre de visites: **totes** les adreces es guarden a la cache de la vora, amb un temps de vida segons el que canvien (un dia per als dies i mesos tancats, un minut per al dia en curs, una hora per al mes en curs, mig minut per a `/api/latest`). Així, una consulta llegeix de D1 un cop per període i no un cop per visitant. El llistat de dies (`/api/days`) es compta a més des de `hourly`, unes seixanta vegades més petita que `readings`.
 
 La clau de la cache es construeix amb els paràmetres ja normalitzats i acotats, no amb l'URL tal com arriba: `?days=7`, `?days=07` i `?days=7&x=1` comparteixen entrada. Sense això, n'hi hauria prou amb repetir peticions amb paràmetres inventats per esgotar les lectures del dia.
 
@@ -95,7 +97,13 @@ L'excepció és `/api/status`, que no es cacheja: les seves consultes ja estan a
 
 La cache és per centre de dades, així que amb visites repartides l'estalvi és gran però no exacte.
 
-L'altre límit que cal vigilar és el de CPU: 10 ms per petició al pla gratuït. Una resposta que el supera no arriba a sortir del Worker: Cloudflare la talla amb l'error 1102 i el client rep un **503** amb el cos `error code: 1102` (no el 500 dels errors del Worker, ni cap JSON). Passava amb `/api/day` i `/data/AAAA-MM-DD.csv` quan no eren a la cache, perquè es creava un formatador de dates per fila (~200 ms per a un dia sencer). Ara la data local es calcula amb un desplaçament d'UTC per hora (`localIso`), i `test/time.test.ts` comprova que no es torni a consultar `Intl` a cada fila. Així i tot, un dia sencer en format llarg (~860 KB) no va sobrat; per això el dashboard demana `/api/day/AAAA-MM-DD/series`, que es genera en un parell de mil·lisegons. El CSV d'un mes sencer (~130.000 files) és massa gran per a aquest límit fins i tot així. Per veure-ho en directe: `npm run tail` mostra `"outcome": "exceededCpu"` i el `cpuTime` de cada petició.
+L'altre límit és el de CPU: 10 ms per petició al pla gratuït. Una resposta que el supera no arriba a sortir del Worker: Cloudflare la talla amb l'error 1102 i el client rep un **503** amb el cos `error code: 1102`, no el 500 dels errors del Worker. Per veure-ho en directe, `npx wrangler tail --format json` mostra `"outcome": "exceededCpu"` i el `cpuTime` de cada petició.
+
+Hi van caure `/api/day` i `/data/AAAA-MM-DD.csv` quan no eren a la cache: es creava un `Intl.DateTimeFormat` per fila, uns 200 ms de CPU per a un dia sencer. Ara la data local es calcula amb un desplaçament d'UTC per hora (`localIso`), i `test/time.test.ts` comprova que no es torni a consultar `Intl` a cada fila. Així i tot, un dia sencer en format llarg (~860 KB) no va sobrat: per això el dashboard demana `/api/day/AAAA-MM-DD/series`, que es genera en un parell de mil·lisegons.
+
+El CSV d'un mes sencer no hi cap de cap manera: són ~130.000 files, i en una prova amb Node només interpretar el resultat de D1 ja costava uns 65 ms, i serialitzar-lo uns 60 més, abans de donar format a cap fila. Per això `/data/AAAA-MM.csv` no es genera al Worker. La GitHub Action que cada matinada desa el CSV del dia anterior a la branca `data` hi munta també el del mes, concatenant-ne els dies, i el Worker només el passa al client: no llegeix cap fila de D1 ni toca el contingut, que viatja comprimit de GitHub al client. La contrapartida és que el mes en curs arriba fins a l'última còpia (normalment ahir) i que un mes sense cap còpia respon 404. L'adreça de la còpia és la variable `DATA_MIRROR_URL` de `wrangler.jsonc`.
+
+Es va descartar muntar el mes al Worker a partir dels dies que ja són a la cache: en un centre de dades que no els tingués, caldria regenerar fins a 31 dies dins la mateixa petició. Repartir-los en invocacions separades (service bindings) tampoc no és una garantia: Cloudflare factura junta la CPU de totes les invocacions d'una petició, no documenta que cadascuna tingui el seu propi límit i n'admet com a màxim 32.
 
 Si tot i així s'esgotessin les lectures, la captura continuaria: només escriu. El que s'aturaria fins a mitjanit UTC és el dashboard, l'API i l'agregat horari.
 
@@ -107,7 +115,7 @@ Si tot i així s'esgotessin les lectures, la captura continuaria: només escriu.
 - **Disponibilitat no publicada**: a estones, saba.es serveix el bloc amb la capacitat total sola, sense la meitat de «Places disponibles» —no és un format estrany, és una dada que no han publicat—, en ràfegues d'entre un i cinc minuts. Aquest cas es distingeix dels altres (l'error ho diu: «el bloc no porta 'Places disponibles'») i és l'únic que es reintenta, un sol cop, cinc segons després. Si el segon intent tampoc no la porta, el minut queda buit i es desa el tros de pàgina. Un error HTTP, un temps d'espera o un format desconegut no es reintenten: repetir-los no els arregla.
 - **Els forats de l'agregat es tapen sols**: l'agregat horari recalcula les 3 últimes hores a cada execució, però una finestra curta no recupera res: si les lectures no es poden llegir durant unes hores (per exemple perquè s'ha esgotat la quota de D1), aquelles hores no s'agregarien mai i `hourly` —d'on surten el mapa de calor, els gràfics de setmanes i mesos i el llistat de dies— quedaria amb un forat permanent. Per això, un cop al dia, es repassa una finestra de 48 hores.
 - **Consultes acotades**: els gràfics de setmanes i mesos llegeixen la taula `hourly`; el panell del Portal de Sant Roc llegeix `daily_santroc` (una fila per dia) i només calcula en viu el dia d'avui. `/api/status`, que es consulta dues vegades cada hora (el cron i la feina de GitHub Actions), també ho està: `MAX(ts)` i `MIN(ts)` van en consultes separades —juntes, SQLite no pot fer servir l'índex i recorre tota la taula— i el recompte de lectures és el del dia, per `idx_readings_local_date`. L'únic recompte total es fa només si es demana amb `?totals=1`.
-- **Còpia fora de Cloudflare**: cada matinada una GitHub Action baixa el CSV del dia anterior i el desa a la branca [`data`](https://github.com/marcgallego/parking_terrassa/tree/data) d'aquest repositori. A més, D1 conserva 30 dies d'historial (Time Travel) per restaurar la base de dades a qualsevol instant amb `wrangler d1 time-travel restore`.
+- **Còpia fora de Cloudflare**: cada matinada una GitHub Action baixa el CSV del dia anterior i el desa a la branca [`data`](https://github.com/marcgallego/parking_terrassa/tree/data) d'aquest repositori. Hi torna a muntar també el CSV del mes (la capçalera una sola vegada i els dies en ordre), que és el que serveix `/data/AAAA-MM.csv`: si algun CSV diari té una capçalera diferent la feina falla, i si hi falta algun dia, ho avisa. A més, D1 conserva 30 dies d'historial (Time Travel) per restaurar la base de dades a qualsevol instant amb `wrangler d1 time-travel restore`.
 - **La capacitat no es dóna per fixa**: les places totals d'un pàrquing poden canviar (places reservades a abonats, una planta tancada per obres). Cada lectura desa la capacitat que saba.es publicava en aquell moment, de manera que el CSV sempre és fidel. A més, cada hora es reconcilia la fitxa de `parkings` amb la capacitat dominant de les últimes 24 h —cal que hi hagi almenys 60 lectures coincidents, per no oscil·lar amb un minut estrany—, i així `/api/parkings` i el denominador del panell del Portal de Sant Roc no es queden congelats. Cada transició distinta deixa una fila a `capacity_changes`, i `/api/status` avisa mentre la constant `PARKINGS` del Worker no coincideixi amb el que s'està llegint.
 - **Vigilància**: `/api/status` respon 503 si fa 15 minuts o més que no s'escriu cap lectura, si hi ha errors de captura a l'última hora o si la capacitat publicada no coincideix amb la que el Worker espera. La feina `Salut de la captura` de GitHub Actions ho consulta cada hora i falla (i per tant avisa) si alguna cosa no va bé. Opcionalment, amb `npx wrangler secret put ALERT_WEBHOOK` el Worker envia també un POST a l'URL que li indiqueu. El cos porta el mateix missatge amb els dos noms de camp habituals —`text`, que fan servir Slack i Telegram, i `content`, que fa servir Discord— i l'estat complet imbricat sota `health`. Per a Telegram, l'URL és `https://api.telegram.org/bot<TOKEN>/sendMessage?chat_id=<ID>`, amb el testimoni que dóna @BotFather.
 
