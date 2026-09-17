@@ -25,6 +25,11 @@ export interface Env {
   LOCAL_TZ?: string;
   /** Opcional: URL a la qual notificar que la captura falla (`wrangler secret put ALERT_WEBHOOK`). */
   ALERT_WEBHOOK?: string;
+  /**
+   * Opcional: arrel de la còpia de dades d'on surten els CSV mensuals ja muntats,
+   * `${DATA_MIRROR_URL}/AAAA/AAAA-MM.csv`. Per defecte, la branca `data` del repositori.
+   */
+  DATA_MIRROR_URL?: string;
 }
 
 const USER_AGENT =
@@ -57,6 +62,15 @@ const HOURLY_WINDOW_HOURS = 3;
  * manteniment (llegeix dos dies de lectures), i per això va un cop al dia.
  */
 const HOURLY_CATCHUP_HOURS = 48;
+/** Còpia pública de les dades (branca `data`), on la GitHub Action munta els CSV mensuals. */
+const DEFAULT_DATA_MIRROR_URL = "https://raw.githubusercontent.com/marcgallego/parking_terrassa/data/data";
+/**
+ * Hores després de mitjanit a partir de les quals el mes anterior es dona per
+ * tancat. La còpia del seu últim dia es fa a les 01:20 UTC (02:20 o 03:20 locals)
+ * i GitHub Actions la pot endarrerir; abans d'això el fitxer mensual encara no
+ * porta l'últim dia i no s'ha de guardar un dia sencer a la cache.
+ */
+const MONTH_CLOSED_AFTER_HOURS = 12;
 
 /**
  * Pàrquings que es capturen. Es defineixen aquí (i no a D1) perquè la captura no
@@ -592,8 +606,8 @@ function json(data: unknown, { status = 200, maxAge = 60 }: ResponseOpts = {}): 
   });
 }
 
-function csv(text: string, filename: string, { maxAge = 60 }: ResponseOpts = {}): Response {
-  return new Response(text, {
+function csv(body: string | ReadableStream, filename: string, { maxAge = 60 }: ResponseOpts = {}): Response {
+  return new Response(body, {
     headers: {
       "Content-Type": "text/csv; charset=utf-8",
       "Content-Disposition": `inline; filename="${filename}"`,
@@ -613,6 +627,26 @@ async function queryReadings(env: Env, where: string, binds: (string | number)[]
     .bind(...binds)
     .all<ReadingRow>();
   return results;
+}
+
+/** Adreça d'un CSV mensual a la còpia de dades: `${base}/AAAA/AAAA-MM.csv`. */
+export function monthMirrorUrl(base: string, month: string): string {
+  return `${base.replace(/\/+$/, "")}/${month.slice(0, 4)}/${month}.csv`;
+}
+
+/**
+ * Descarrega un fitxer de la còpia de dades. El termini només corre fins que
+ * arriben les capçaleres: el cos d'un mes (~10 MB) es passa al client a mesura
+ * que arriba, i tallar-lo a mitges deixaria un CSV truncat.
+ */
+async function fetchMirror(url: string): Promise<Response> {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { headers: { "User-Agent": USER_AGENT }, signal: ctl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -740,17 +774,35 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   }
 
   // /data/AAAA-MM.csv (mes sencer)
+  //
+  // No es genera aquí. Un mes són ~130.000 files, i només interpretar el
+  // resultat de D1 ja supera els 10 ms de CPU del pla gratuït: Cloudflare talla
+  // la resposta amb l'error 1102. El fitxer el munta cada matinada la còpia
+  // diària de GitHub Actions a la branca `data`, concatenant els CSV diaris, i
+  // el Worker només el passa al client, sense llegir D1 ni tocar-ne cap byte.
+  // Per això el mes en curs arriba fins a l'última còpia (normalment, ahir).
   const monthMatch = path.match(/^\/data\/(\d{4}-\d{2})\.csv$/);
   if (monthMatch) {
     const month = monthMatch[1] as string;
-    const past = month < closedBefore.slice(0, 7);
-    // El mes en curs també es guarda a la cache: una petició llegeix el mes
-    // sencer (~130.000 files a final de mes), la lectura més cara de totes.
-    return withCache(request, path, past ? 86_400 : 300, async () => {
-      const rows = await queryReadings(env, "r.local_date >= ?1 AND r.local_date < ?2", [`${month}-01`, `${month}-32`]);
-      return csv(toCsv(rows.map((r) => rowToRecord(r, tz))), `parking-terrassa-${month}.csv`, {
-        maxAge: past ? 86_400 : 300,
-      });
+    const closedMonth = localParts(new Date(Date.now() - MONTH_CLOSED_AFTER_HOURS * 3_600_000), tz).local_date.slice(0, 7);
+    // Un mes tancat ja no canvia; el mes en curs, un cop al dia, amb la còpia.
+    const maxAge = month < closedMonth ? 86_400 : 3600;
+    return withCache(request, path, maxAge, async () => {
+      const upstream = await fetchMirror(monthMirrorUrl(env.DATA_MIRROR_URL ?? DEFAULT_DATA_MIRROR_URL, month));
+      if (upstream.status === 404) {
+        return json({ error: "no trobat", detail: `encara no hi ha cap còpia de ${month}; els dies solts són a /data/AAAA-MM-DD.csv` }, { status: 404 });
+      }
+      if (!upstream.ok || !upstream.body) {
+        return json({ error: "còpia de dades no disponible", detail: `HTTP ${upstream.status}` }, { status: 502, maxAge: 0 });
+      }
+      const res = csv(upstream.body, `parking-terrassa-${month}.csv`, { maxAge });
+      // GitHub el serveix comprimit (~17 vegades menys). Si es conserva la
+      // codificació i no se'n llegeix el cos, passa tal com arriba: descomprimir
+      // 10 MB al Worker tornaria a costar CPU. La vora el descomprimeix per als
+      // clients que no acceptin gzip.
+      const encoding = upstream.headers.get("Content-Encoding");
+      if (encoding) res.headers.set("Content-Encoding", encoding);
+      return res;
     });
   }
 
