@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="ca">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pàrquings Saba de Terrassa</title>
+<meta name="description" content="Dataset obert d'ocupació minut a minut dels pàrquings Saba de Terrassa: Plaça Vella, Ajuntament-Mercat i Dr. Robert.">
+<link rel="stylesheet" href="/build/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='18' fill='%232a78d6'/><text x='50' y='72' font-size='64' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='white'>P</text></svg>">
+<script type="module" src="/build/saba.js"></script>
+</head>
+<body>
+<header class="top">
+  <div>
+    <a class="backlink" href="/">← Cal un altre pàrquing al centre?</a>
+    <h1 class="title"><span class="logo" aria-hidden="true">P</span>Pàrquings Saba de Terrassa</h1>
+    <p class="sub">Ocupació minut a minut de Plaça Vella, Ajuntament-Mercat i Dr. Robert. Dades obertes, capturades de <a href="https://www.saba.es/ca/parking-terrassa" rel="noopener">saba.es</a>.</p>
+    <p class="sub">Són els pàrquings del centre que publiquen l'ocupació. D'altres, com el d'Egarvia a la plaça del Progrés, no en publiquen dades i per això no hi són.</p>
+  </div>
+  <p class="status" id="status"><span class="dot" aria-hidden="true"></span><span id="status-text">Carregant…</span></p>
+</header>
+
+<main>
+  <section class="kpi" id="kpi" aria-label="Estat actual"></section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>Ocupació</h2>
+      <div class="filters" role="group" aria-label="Interval">
+        <button class="chip" data-range="today">Avui</button>
+        <button class="chip" data-range="7">7 dies</button>
+        <button class="chip" data-range="30">30 dies</button>
+      </div>
+    </div>
+    <p class="notice" id="notice" role="status" hidden></p>
+    <div class="legend" id="line-legend" aria-label="Mostra o amaga pàrquings"></div>
+    <div class="chart" id="line-chart"></div>
+    <p class="hint zoom-hint">Arrossega sobre el gràfic per ampliar un tram; doble clic per tornar a la vista sencera.</p>
+    <details class="tbl"><summary>Veure com a taula</summary><div class="tbl-wrap" id="line-table"></div></details>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>Patró setmanal</h2>
+      <div class="filters" role="group" aria-label="Setmanes">
+        <button class="chip" data-weeks="4">4 setmanes</button>
+        <button class="chip" data-weeks="8">8 setmanes</button>
+        <button class="chip" data-weeks="26">26 setmanes</button>
+      </div>
+    </div>
+    <p class="hint">Ocupació mitjana per dia de la setmana i hora local. Com més fosc, més ple.</p>
+    <div id="heatmaps"></div>
+    <div class="ramp" aria-hidden="true"><span>0 %</span><i></i><span>100 %</span></div>
+    <details class="tbl"><summary>Veure com a taula</summary><div class="tbl-wrap" id="heat-table"></div></details>
+  </section>
+
+  <section class="card" id="data">
+    <div class="card-head"><h2>Dades obertes</h2></div>
+    <p>Una fila per pàrquing i minut. Fitxers CSV amb capçalera, UTF-8, separats per comes. Llicència <a href="https://creativecommons.org/licenses/by/4.0/deed.ca" rel="license">CC BY 4.0</a>; font original Saba Infraestructures.</p>
+    <div class="dl-grid">
+      <div>
+        <h3>Descàrregues</h3>
+        <ul class="links" id="downloads"></ul>
+        <p class="hint">Per dies: <code>/data/AAAA-MM-DD.csv</code> · per mesos: <code>/data/AAAA-MM.csv</code></p>
+      </div>
+      <div>
+        <h3>API (JSON, CORS obert)</h3>
+        <ul class="links">
+          <li><a href="/api/latest"><code>/api/latest</code></a> última lectura de cada pàrquing</li>
+          <li><a href="/api/day/" id="api-today"><code>/api/day/AAAA-MM-DD</code></a> lectures d'un dia</li>
+          <li><a href="/api/hourly?days=7"><code>/api/hourly?days=7</code></a> agregat horari (fins a 92 dies)</li>
+          <li><a href="/api/heatmap?weeks=8"><code>/api/heatmap?weeks=8</code></a> mitjana per dia de la setmana i hora</li>
+          <li><a href="/api/santroc?days=30&amp;threshold=25"><code>/api/santroc?days=30&amp;threshold=25</code></a> mínim diari de places lliures a prop del Portal de Sant Roc</li>
+          <li><a href="/api/parkings"><code>/api/parkings</code></a> fitxa dels pàrquings</li>
+          <li><a href="/api/days"><code>/api/days</code></a> dies amb dades</li>
+          <li><a href="/api/status"><code>/api/status</code></a> estat de la captura</li>
+          <li><a href="/datapackage.json"><code>/datapackage.json</code></a> descripció del dataset (Frictionless)</li>
+        </ul>
+      </div>
+    </div>
+    <h3>Columnes</h3>
+    <div class="tbl-wrap">
+    <table class="schema">
+      <thead><tr><th>columna</th><th>descripció</th></tr></thead>
+      <tbody>
+        <tr><td><code>timestamp_utc</code></td><td>instant de la captura en UTC, truncat al minut</td></tr>
+        <tr><td><code>timestamp_local</code></td><td>el mateix instant en hora local (Europe/Madrid), ISO 8601</td></tr>
+        <tr><td><code>parking_id</code></td><td>identificador del pàrquing a saba.es (53, 54, 55)</td></tr>
+        <tr><td><code>parking_slug</code></td><td><code>placa-vella</code>, <code>ajuntament-mercat</code>, <code>dr-robert</code></td></tr>
+        <tr><td><code>capacity</code></td><td>places totals publicades</td></tr>
+        <tr><td><code>available</code></td><td>places lliures</td></tr>
+        <tr><td><code>occupied</code></td><td>capacity − available</td></tr>
+        <tr><td><code>occupancy_pct</code></td><td>100 · occupied / capacity, una decimal</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <nav class="footer-nav" aria-label="Enllaços">
+    <a href="/saba#data">Dades obertes</a>
+    <a href="https://github.com/marcgallego/parking_terrassa" rel="noopener">Codi font</a>
+  </nav>
+  <p>Fet per <a href="https://github.com/marcgallego" rel="author noopener">Marc Gállego Asín</a>. Projecte independent, sense relació amb Saba.</p>
+</footer>
+</body>
+</html>

@@ -37,6 +37,13 @@ const CRON_HOURLY = "7 * * * *";
 const ERROR_RETENTION_DAYS = 30;
 /** Caràcters de la pàgina que es desen quan no se sap llegir, per poder-la diagnosticar. */
 const ERROR_HTML_CHARS = 1000;
+/**
+ * Espera abans de reintentar quan saba.es ha servit el bloc sense la xifra de
+ * places lliures. Un sol reintent: dins del minut hi ha marge de sobres (dues
+ * descàrregues amb FETCH_TIMEOUT_MS i aquesta espera), i les tres fitxes es
+ * descarreguen en paral·lel.
+ */
+const MISSING_AVAILABILITY_RETRY_MS = 5_000;
 /** Minuts sense cap lectura nova a partir dels quals la captura es considera aturada. */
 const STALE_ALERT_MINUTES = 15;
 /**
@@ -252,6 +259,26 @@ export function localIso(ts: number, tz: string): string {
 
 const AVAILABLE_RE =
   /Places:\s*<strong>\s*(\d+)\s*<\/strong>[\s\S]*?Places disponibles:\s*<strong>\s*(\d+)\s*<\/strong>/;
+/** Només la meitat de la capacitat, per saber si el bloc manté el format conegut. */
+const CAPACITY_RE = /Places:\s*<strong>\s*(\d+)\s*<\/strong>/;
+
+/**
+ * saba.es ha servit el bloc d'ocupació amb la capacitat total sola, sense la
+ * meitat de «Places disponibles»:
+ *
+ *     <div class="available-places">Places: <strong>297</strong>   </div>
+ *
+ * No hi ha cap xifra de places lliures a llegir —no és un format estrany, és
+ * una dada que no s'ha publicat—, i passa a estones, en ràfegues d'entre un i
+ * cinc minuts. Té un tipus propi perquè és l'únic cas que val la pena
+ * reintentar.
+ */
+export class MissingAvailability extends Error {
+  constructor() {
+    super("el bloc 'available-places' no porta 'Places disponibles'");
+    this.name = "MissingAvailability";
+  }
+}
 
 /**
  * Tros de pàgina que es desa quan la captura falla: la finestra al voltant del
@@ -267,8 +294,20 @@ export function htmlSnippet(html: string): string {
 export function parseOccupancy(html: string): { capacity: number; available: number } {
   const i = html.indexOf('class="available-places"');
   if (i < 0) throw new Error("no s'ha trobat el bloc 'available-places'");
-  const m = AVAILABLE_RE.exec(html.slice(i, i + 600));
-  if (!m) throw new Error("bloc 'available-places' amb format inesperat");
+  const block = html.slice(i, i + 600);
+  const m = AVAILABLE_RE.exec(block);
+  if (!m) {
+    // Es distingeixen els dos casos perquè volen coses molt diferents: si la
+    // xifra no s'ha publicat, val la pena reintentar; si el format ha canviat,
+    // cal tocar el parser. Per dir que no s'ha publicat calen les dues coses:
+    //   - que la meitat de la capacitat mantingui el format conegut, i
+    //   - que «Places disponibles» no aparegui en tota la pàgina.
+    // Amb una sola de les dues no n'hi ha prou: una pàgina redissenyada tampoc
+    // no porta «Places disponibles» i reintentar-la no serviria de res, i si hi
+    // és però lluny del bloc, el problema és de format i no de dada absent.
+    if (CAPACITY_RE.test(block) && !html.includes("Places disponibles")) throw new MissingAvailability();
+    throw new Error("bloc 'available-places' amb format inesperat");
+  }
   const capacity = Number(m[1]);
   const available = Number(m[2]);
   if (!Number.isInteger(capacity) || capacity <= 0 || capacity > 5000) throw new Error(`capacitat inversemblant (${capacity})`);
@@ -303,13 +342,27 @@ async function scrapeAll(env: Env, now = new Date()): Promise<{ ts: number; outc
       // `html` es declara fora del try perquè, si el que falla és llegir-la (i no
       // descarregar-la), el catch la pugui desar com a prova.
       let html: string | undefined;
-      try {
-        html = await fetchPage(p.url);
-        const r = parseOccupancy(html);
-        if (r.capacity !== p.capacity) console.warn(`parking ${p.id}: capacitat ${r.capacity} (esperada ${p.capacity})`);
-        return { id: p.id, ...r };
-      } catch (e) {
-        return { id: p.id, error: errorMessage(e), html: html === undefined ? null : htmlSnippet(html) };
+      for (let attempt = 0; ; attempt++) {
+        // Es reinicia a cada intent perquè la prova desada correspongui sempre
+        // a l'error desat, i no a la pàgina d'un intent anterior.
+        html = undefined;
+        try {
+          html = await fetchPage(p.url);
+          const r = parseOccupancy(html);
+          if (r.capacity !== p.capacity) console.warn(`parking ${p.id}: capacitat ${r.capacity} (esperada ${p.capacity})`);
+          return { id: p.id, ...r };
+        } catch (e) {
+          // Un sol reintent, i només si la xifra de places lliures no s'ha
+          // publicat: és l'únic error transitori per naturalesa. Un error HTTP,
+          // un temps d'espera o un format desconegut no es reintenten, perquè
+          // repetir-los no els arregla.
+          if (attempt === 0 && e instanceof MissingAvailability) {
+            console.warn(`parking ${p.id}: sense places lliures publicades, reintentant`);
+            await new Promise((r) => setTimeout(r, MISSING_AVAILABILITY_RETRY_MS));
+            continue;
+          }
+          return { id: p.id, error: errorMessage(e), html: html === undefined ? null : htmlSnippet(html) };
+        }
       }
     }),
   );

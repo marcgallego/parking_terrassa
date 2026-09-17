@@ -1,3 +1,5 @@
+@import "uplot/dist/uPlot.min.css";
+
 :root {
   color-scheme: light;
   --surface-0: #f4f4f2;
@@ -57,60 +59,89 @@ body {
   color: var(--text-primary); background: var(--surface-0);
 }
 a { color: inherit; }
+:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
 code { font: 0.9em ui-monospace, SFMono-Regular, Menlo, monospace; }
 h1 { font-size: 1.6rem; margin: 0; letter-spacing: -0.01em; }
 h2 { font-size: 1.1rem; margin: 0; }
 h3 { font-size: 0.95rem; margin: 18px 0 8px; color: var(--text-secondary); }
 main, header.top, footer { max-width: 1100px; margin: 0 auto; }
-header.top { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: flex-end; justify-content: space-between; padding: 28px 0 16px; }
+
+/* ----- capçalera i navegació ----- */
+header.top { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: flex-end; justify-content: space-between; padding: 32px 0 16px; }
+.backlink { display: inline-block; margin-bottom: 12px; color: var(--text-secondary); text-decoration: none; font-size: 0.9rem; }
+.backlink:hover { color: var(--text-primary); text-decoration: underline; }
+/* la P blava davant del titular; alineada amb la primera línia si el titular fa salt */
+h1.title { display: flex; align-items: flex-start; gap: 12px; }
+.logo { flex: none; width: 34px; height: 34px; margin-top: 2px; border-radius: 8px; background: var(--series-1); color: #fff; display: grid; place-items: center; font-size: 22px; font-weight: 700; line-height: 1; letter-spacing: 0; }
+header.top > div { max-width: 680px; }
 .sub { margin: 4px 0 0; color: var(--text-secondary); }
 .status { margin: 0; color: var(--text-secondary); font-size: 0.9rem; display: flex; align-items: center; gap: 8px; }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--text-muted); display: inline-block; }
 .status.is-live .dot { background: var(--good); }
 .status.is-stale .dot { background: var(--bad); }
-footer { color: var(--text-muted); font-size: 0.85rem; padding-top: 16px; }
+footer { color: var(--text-muted); font-size: 0.85rem; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line); }
+.footer-nav { display: flex; flex-wrap: wrap; gap: 6px 20px; font-size: 0.9rem; }
+.footer-nav a { color: var(--text-secondary); text-decoration: none; }
+.footer-nav a:hover { color: var(--text-primary); text-decoration: underline; }
+.footer-nav a[aria-current="page"] { color: var(--text-primary); font-weight: 600; }
 
+/* ----- tiles d'estat ----- */
 .kpi { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-bottom: 12px; }
-.tile { background: var(--surface-1); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; display: grid; gap: 6px; }
+.kpi:empty { min-height: 190px; } /* reserva l'espai mentre carrega, perquè la pàgina no salti */
+.tile { background: var(--surface-1); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; display: grid; gap: 6px; min-width: 0; }
 .tile .name { font-weight: 600; display: flex; align-items: center; gap: 8px; }
 .swatch { width: 10px; height: 10px; border-radius: 3px; display: inline-block; flex: none; }
 .tile .hero { font-size: 44px; font-weight: 700; line-height: 1; letter-spacing: -0.02em; }
 .tile .hero small { font-size: 15px; font-weight: 400; color: var(--text-secondary); margin-left: 6px; letter-spacing: 0; }
 .tile .meter { height: 8px; border-radius: 4px; background: var(--meter-track); overflow: hidden; }
-.tile .meter i { display: block; height: 100%; border-radius: 4px; background: var(--seq-fill, var(--series-1)); transition: width .4s; }
+.tile .meter i { display: block; height: 100%; border-radius: 4px; background: var(--series-1); transition: width .4s; }
 .tile .meta { display: flex; justify-content: space-between; color: var(--text-secondary); font-size: 0.85rem; }
-.tile .spark { width: 100%; height: 36px; display: block; }
+.tile .spark { height: 36px; min-width: 0; overflow: hidden; }
 .tile.is-empty { color: var(--text-muted); }
 
-.card { background: var(--surface-1); border: 1px solid var(--line); border-radius: 12px; padding: 18px; margin-bottom: 12px; }
+.callout { display: flex; align-items: center; justify-content: space-between; gap: 16px; text-decoration: none; background: var(--surface-1); border: 1px solid var(--series-1); box-shadow: 0 0 0 1px var(--series-1) inset; border-radius: 12px; padding: 14px 18px; margin-bottom: 12px; color: var(--text-secondary); font-size: 0.9rem; }
+.callout b { display: block; color: var(--text-primary); font-size: 1rem; margin-bottom: 2px; }
+.callout .arrow { font-size: 1.4rem; color: var(--series-1); flex: none; }
+.callout:hover { background: color-mix(in srgb, var(--series-1) 6%, var(--surface-1)); }
+
+/* ----- targetes i filtres ----- */
+.card { background: var(--surface-1); border: 1px solid var(--line); border-radius: 12px; padding: 18px; margin-bottom: 12px; min-width: 0; }
 .card-head { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; justify-content: space-between; margin-bottom: 10px; }
-.filters { display: flex; gap: 6px; flex-wrap: wrap; }
+.card-head > div:first-child { max-width: 680px; }
+.card-head .hint { margin: 4px 0 0; }
+.filters { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .chip { border: 1px solid var(--line); background: transparent; color: var(--text-primary); border-radius: 999px; padding: 5px 12px; font: inherit; font-size: 0.85rem; cursor: pointer; }
+.chip:hover { border-color: var(--text-muted); }
 .chip.is-on { background: var(--chip-on); color: var(--chip-on-text); border-color: var(--chip-on); }
+.flabel { font-size: 0.8rem; color: var(--text-muted); margin-right: 2px; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 10px 28px; align-items: center; margin-bottom: 12px; }
 .hint { color: var(--text-muted); font-size: 0.85rem; margin: 0 0 10px; }
 .notice { color: var(--bad); font-size: 0.85rem; margin: 0 0 10px; }
-.legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 4px; }
-.legend span { display: inline-flex; align-items: center; gap: 6px; }
-.legend i { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
 
-.chart { position: relative; width: 100%; }
-.chart svg { width: 100%; height: auto; display: block; overflow: visible; font-size: 11px; max-width: 100%; }
-.chart .grid line { stroke: var(--grid); stroke-width: 1; }
-.chart .axis text { fill: var(--text-muted); }
-.chart .axis line, .chart .axis path { stroke: var(--line); }
-.chart .series path { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
-.chart .end-label { font-size: 11px; font-weight: 600; fill: var(--text-secondary); }
-.chart .hover { opacity: 0; }
-.chart .hover.is-on { opacity: 1; }
-.chart .hover line { stroke: var(--text-muted); stroke-width: 1; }
-.chart .hover circle { stroke: var(--surface-1); stroke-width: 2; }
-.chart .empty { fill: var(--text-muted); font-size: 13px; }
+/* ----- gràfics (uPlot) ----- */
+.legend { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.legend-item { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); background: transparent; color: var(--text-secondary); border-radius: 999px; padding: 3px 10px; font: inherit; font-size: 0.85rem; cursor: pointer; }
+.legend-item i { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
+.legend-item[aria-pressed="false"] { opacity: 0.45; text-decoration: line-through; }
+.legend-static { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 6px; font-size: 0.85rem; color: var(--text-secondary); }
+.legend-static span { display: inline-flex; align-items: center; gap: 6px; }
+.legend-static i { width: 16px; height: 2px; border-radius: 2px; display: inline-block; }
+.legend-static i.is-total { height: 3px; }
+.chart { position: relative; width: 100%; min-width: 0; overflow: hidden; }
+.chart-empty { display: grid; place-items: center; margin: 0; color: var(--text-muted); font-size: 0.9rem; border: 1px dashed var(--line); border-radius: 8px; }
+.uplot { font-family: inherit; }
+.u-over { cursor: crosshair; }
+.u-hz .u-cursor-x { border-right: 1px solid var(--text-muted); }
+.u-select { background: color-mix(in srgb, var(--text-primary) 8%, transparent); }
+.zoom-hint { margin: 6px 0 0; }
+@media (hover: none) { .zoom-hint { display: none; } }
 
-.tip { position: fixed; z-index: 10; pointer-events: none; background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 0.82rem; box-shadow: 0 4px 16px rgba(0,0,0,.12); max-width: 260px; }
+.tip { position: fixed; z-index: 10; pointer-events: none; background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 0.82rem; box-shadow: 0 4px 16px rgba(0,0,0,.12); max-width: 280px; }
 .tip b { display: block; margin-bottom: 4px; color: var(--text-secondary); font-weight: 600; }
-.tip .row { display: flex; justify-content: space-between; gap: 14px; }
+.tip .row { display: flex; justify-content: space-between; gap: 14px; font-variant-numeric: tabular-nums; }
 .tip .row i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; margin-right: 6px; }
 
+/* ----- patró setmanal ----- */
 .heat { margin: 14px 0 6px; }
 .heat .hname { font-size: 0.9rem; font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
 .heat .grid { display: grid; grid-template-columns: 34px repeat(24, 1fr); gap: 2px; }
@@ -121,22 +152,19 @@ footer { color: var(--text-muted); font-size: 0.85rem; padding-top: 16px; }
 .ramp { display: flex; align-items: center; gap: 8px; font-size: 0.75rem; color: var(--text-muted); margin-top: 8px; }
 .ramp i { flex: 0 0 140px; height: 8px; border-radius: 4px; background: linear-gradient(90deg, var(--seq-lo), var(--seq-hi)); }
 
-.card.focus { border-color: var(--series-1); box-shadow: 0 0 0 1px var(--series-1) inset; }
-.card.focus .card-head > div:first-child { max-width: 620px; }
-.card.focus h3 { margin-top: 22px; }
-.filters-2 { display: grid; gap: 8px; justify-items: end; }
-.flabel { font-size: 0.8rem; color: var(--text-muted); align-self: center; margin-right: 2px; }
-.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-top: 6px; }
-.stat { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; display: grid; gap: 2px; }
+/* ----- Portal de Sant Roc ----- */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 12px; }
+.stat { background: var(--surface-1); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; display: grid; gap: 2px; align-content: start; }
 .stat .v { font-size: 28px; font-weight: 700; line-height: 1.1; letter-spacing: -0.02em; }
 .stat .v small { font-size: 13px; font-weight: 400; color: var(--text-secondary); margin-left: 4px; letter-spacing: 0; }
 .stat .l { font-size: 0.82rem; color: var(--text-secondary); }
 .stat .s { font-size: 0.78rem; color: var(--text-muted); }
 .stat.is-bad .v { color: var(--bad); }
-.chart .ref line { stroke: var(--bad); stroke-width: 1; }
-.chart .ref text { fill: var(--bad); font-size: 10.5px; font-weight: 600; }
-.chart .bars rect { rx: 2; }
-.chart .bars rect.is-below { fill: var(--bad); }
+.prose p, .prose ul { max-width: 72ch; color: var(--text-secondary); }
+.prose ul { padding-left: 1.2em; }
+.prose li + li { margin-top: 4px; }
+
+/* ----- taules i dades ----- */
 details.tbl { margin-top: 10px; font-size: 0.85rem; }
 details.tbl summary { cursor: pointer; color: var(--text-secondary); }
 .tbl-wrap { overflow-x: auto; }
@@ -145,13 +173,12 @@ th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--grid
 th { color: var(--text-secondary); font-weight: 600; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 table.schema td { white-space: normal; }
-
 .dl-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 8px 32px; }
 ul.links { list-style: none; padding: 0; margin: 0; display: grid; gap: 5px; }
-ul.links a { color: var(--series-1); }
+ul.links a, .prose a { color: var(--series-1); }
+
 @media (max-width: 600px) {
   .tile .hero { font-size: 36px; }
   .heat .grid { grid-template-columns: 22px repeat(24, minmax(0, 1fr)); gap: 1px; }
   .heat .cell { aspect-ratio: 1; }
-  .heat .cl { font-size: 0.6rem; }
-}
+  .heat .cl { font-size: 0.6rem; }}
