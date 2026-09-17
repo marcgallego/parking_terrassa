@@ -37,15 +37,26 @@
     <section class="card">
       <div class="card-head">
         <div>
-          <h2>Avui, minut a minut</h2>
-          <p class="hint">Places lliures entre tots dos pàrquings i de cadascun. La línia vermella marca el llindar de
-            25 places lliures, que es compara amb el total.</p>
+          <h2 id="sr-chart-title">Avui, dades minut a minut</h2>
+          <p class="hint" id="sr-chart-hint">Places lliures entre tots dos pàrquings i de cadascun. La línia vermella
+            marca el llindar de 25 places lliures, que es compara amb el total.</p>
         </div>
+        <div class="filters" role="group" aria-label="Interval">
+          <button class="chip" data-interval="dia">Un dia</button>
+          <button class="chip" data-interval="7">7 dies</button>
+          <button class="chip" data-interval="30">30 dies</button>
+        </div>
+      </div>
+      <div class="daynav" id="sr-daynav" role="group" aria-label="Dia">
+        <button type="button" class="chip nav" id="sr-prev" aria-label="Dia anterior">‹</button>
+        <input class="dayinput" type="date" id="sr-date" aria-label="Dia que es mostra">
+        <button type="button" class="chip nav" id="sr-next" aria-label="Dia següent">›</button>
+        <button type="button" class="chip" id="sr-go-today">Avui</button>
       </div>
       <div class="legend-static"><span><i class="is-total"
             style="background:var(--text-primary)"></i>Total</span><span><i style="background:var(--series-1)"></i>Plaça
           Vella</span><span><i style="background:var(--series-2)"></i>Ajuntament-Mercat</span></div>
-      <div class="chart" id="sr-today"></div>
+      <div class="chart" id="sr-chart"></div>
       <p class="hint zoom-hint">Arrossega sobre el gràfic per ampliar un tram; doble clic per tornar a la vista sencera.
       </p>
     </section>

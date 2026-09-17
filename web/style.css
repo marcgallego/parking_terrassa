@@ -116,6 +116,15 @@ footer { color: var(--text-muted); font-size: 0.85rem; margin-top: 24px; padding
 .hint { color: var(--text-muted); font-size: 0.85rem; margin: 0 0 10px; }
 .notice { color: var(--bad); font-size: 0.85rem; margin: 0 0 10px; }
 
+/* ----- selector de dia ----- */
+.daynav { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 0 0 10px; }
+.daynav[hidden] { display: none; }
+.daynav .nav { padding: 4px 11px; font-size: 1rem; line-height: 1.1; }
+.chip:disabled { opacity: 0.4; cursor: default; }
+.chip:disabled:hover { border-color: var(--line); }
+.dayinput { border: 1px solid var(--line); background: transparent; color: var(--text-primary); border-radius: 999px; padding: 4px 12px; font: inherit; font-size: 0.85rem; }
+.dayinput::-webkit-calendar-picker-indicator { cursor: pointer; }
+
 /* ----- gràfics (uPlot) ----- */
 .legend { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
 .legend-item { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); background: transparent; color: var(--text-secondary); border-radius: 999px; padding: 3px 10px; font: inherit; font-size: 0.85rem; cursor: pointer; }
@@ -165,7 +174,7 @@ footer { color: var(--text-muted); font-size: 0.85rem; margin-top: 24px; padding
 /* ----- taules i dades ----- */
 details.tbl { margin-top: 10px; font-size: 0.85rem; }
 details.tbl summary { cursor: pointer; color: var(--text-secondary); }
-.tbl-wrap { overflow-x: auto; }
+.tbl-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin-top: 8px; }
 th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
 th { color: var(--text-secondary); font-weight: 600; }
@@ -175,8 +184,32 @@ table.schema td { white-space: normal; }
 ul.links { list-style: none; padding: 0; margin: 0; display: grid; gap: 5px; }
 ul.links a, .prose a { color: var(--series-1); }
 
+/* ----- telèfon ----- */
 @media (max-width: 600px) {
+  /* menys marge a cada banda: el gràfic és el que hi guanya amplada */
+  body { padding: 0 12px 32px; }
+  header.top { padding: 20px 0 12px; }
+  h1 { font-size: 1.32rem; }
+  h1.title { gap: 10px; }
+  .logo { width: 30px; height: 30px; font-size: 19px; margin-top: 0; }
+  .sub { font-size: 0.92rem; }
+  .card { padding: 14px 12px; }
+  .card-head { gap: 8px 12px; }
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .stat { padding: 10px 12px; }
+  .stat .v { font-size: 24px; }
+  .tile { padding: 14px; }
   .tile .hero { font-size: 36px; }
+  .callout { padding: 12px 14px; }
   .heat .grid { grid-template-columns: 22px repeat(24, minmax(0, 1fr)); gap: 1px; }
   .heat .cell { aspect-ratio: 1; }
-  .heat .cl { font-size: 0.6rem; }}
+  .heat .cl { font-size: 0.6rem; }
+}
+
+/* Amb el dit, els botons han de ser prou grans per tocar-los sense apuntar. */
+@media (pointer: coarse) {
+  .chip, .legend-item { padding: 9px 14px; font-size: 0.88rem; }
+  .daynav .nav { min-width: 44px; padding: 9px 12px; }
+  .dayinput { padding: 8px 12px; font-size: 0.88rem; }
+  details.tbl summary { padding: 8px 0; }
+}

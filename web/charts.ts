@@ -163,6 +163,27 @@ export function tooltipPlugin(render: (u: uPlot, idx: number) => string): uPlot.
   };
 }
 
+/**
+ * Clic sobre un punt del gràfic. No compta si s'ha arrossegat (això amplia un
+ * tram), de manera que conviu amb el zoom.
+ */
+export function clickPlugin(onPick: (idx: number) => void): uPlot.Plugin {
+  return {
+    hooks: {
+      ready: (u) => {
+        let downX = NaN;
+        u.over.style.cursor = "pointer";
+        u.over.addEventListener("pointerdown", (e) => { downX = e.clientX; });
+        u.over.addEventListener("click", (e) => {
+          // Amb downX sense valor (clic sintètic), la comparació és falsa i el clic compta.
+          if (Math.abs(e.clientX - downX) > 4) return;
+          onPick(u.posToIdx(e.clientX - u.over.getBoundingClientRect().left));
+        });
+      },
+    },
+  };
+}
+
 /** Línia horitzontal de referència amb etiqueta (p. ex. el llindar de places lliures). */
 export function refLinePlugin(value: number, label: string, color: string): uPlot.Plugin {
   const bg = alpha(cssVar("--surface-1"), 0.85);
