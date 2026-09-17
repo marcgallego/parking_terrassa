@@ -1,7 +1,7 @@
 /* Pàgina del Portal de Sant Roc: places lliures sumades d'Ajuntament-Mercat i Plaça Vella. */
 import { getJson } from "./api";
 import type { DayRecord, SantRocDay, SantRocResponse, Slug } from "./api";
-import { $, COLOR_VAR, NAMES, SANT_ROC, addDays, atSec, chips, cssVar, esc, fmtDay, fmtTime, localToday, logErr, pct1, renderStatus, tableHtml, tipRow, zonedMidnight } from "./common";
+import { $, COLOR_VAR, NAMES, SANT_ROC, addDays, atSec, cssVar, esc, fmtDay, fmtTime, localToday, logErr, pct1, renderStatus, tableHtml, tipRow, zonedMidnight } from "./common";
 import { alignSeries, barSeries, baseOptions, lineSeries, mount, refLinePlugin, timeAxis, tooltipPlugin, valueAxis } from "./charts";
 
 // Aquesta pàgina és la portada; els enllaços antics a la de tots els pàrquings (/?range=, /?weeks=) porten a /saba.
@@ -9,19 +9,12 @@ const legacyParams = new URLSearchParams(location.search);
 const legacy = legacyParams.has("range") || legacyParams.has("weeks");
 if (legacy) location.replace(`/saba${location.search}`);
 
-type Days = "30" | "90" | "365";
-type Threshold = "10" | "25" | "50";
+/** Mentre el dataset sigui curt, el període és tot el que hi ha i el llindar és fix. */
+const DAYS = 365;
+const THRESHOLD = 25;
 
 /** Un minut d'avui amb lectura dels dos pàrquings. `x` en segons Unix. */
 interface FreePoint { x: number; free: number; capacity: number; parts: Partial<Record<Slug, number>> }
-
-let days = chips<Days>("srdays", ["30", "90", "365"], "30", (v) => { days = v; loadPeriod().catch(logErr); });
-let threshold = Number(chips<Threshold>("threshold", ["10", "25", "50"], "25", (v) => {
-  threshold = Number(v);
-  renderToday();
-  renderStats();
-  loadPeriod().catch(logErr);
-}));
 
 let today: FreePoint[] | null = null;
 let todayDay = localToday();
@@ -69,7 +62,7 @@ async function loadToday(): Promise<void> {
 
 function renderToday(): void {
   if (!today) return;
-  const points = today, t = threshold, day = todayDay;
+  const points = today, t = THRESHOLD, day = todayDay;
   const capacity = points[points.length - 1]?.capacity ?? period?.capacity ?? 0;
   const yMax = Math.max(capacity, t * 2, ...points.map((p) => p.free));
   const byX = new Map(points.map((p) => [p.x, p]));
@@ -110,7 +103,7 @@ function renderToday(): void {
 async function loadPeriod(): Promise<void> {
   const req = ++periodReq;
   const day = localToday();
-  const sr = await getJson<SantRocResponse>(`/api/santroc?days=${days}&threshold=${threshold}`);
+  const sr = await getJson<SantRocResponse>(`/api/santroc?days=${DAYS}&threshold=${THRESHOLD}`);
   if (req !== periodReq) return;
   period = sr;
   periodDay = day;
@@ -167,7 +160,7 @@ function statHtml(value: string, unit: string, label: string, sub = "", bad = fa
 }
 
 function renderStats(): void {
-  const points = today ?? [], t = threshold;
+  const points = today ?? [], t = THRESHOLD;
   const now = points[points.length - 1];
   const todayMin = points.reduce<FreePoint | null>((acc, p) => (acc === null || p.free < acc.free ? p : acc), null);
   const out = [
@@ -181,11 +174,16 @@ function renderStats(): void {
     const totalMinutes = list.reduce((a, d) => a + d.minutes, 0);
     const belowMinutes = list.reduce((a, d) => a + d.minutes_below, 0);
     const daysBelow = list.filter((d) => d.minutes_below > 0).length;
-    const worst = list.reduce<SantRocDay | null>((acc, d) => (acc === null || d.min_free < acc.min_free ? d : acc), null);
+    // El mínim del període inclou el d'avui, que es refresca cada minut: si avui
+    // es bat el rècord, l'indicador ho diu a l'instant i no l'endemà.
+    const worst = [
+      ...list.map((d) => ({ free: d.min_free, at: new Date(d.min_at_utc) })),
+      ...(todayMin ? [{ free: todayMin.free, at: new Date(todayMin.x * 1000) }] : []),
+    ].reduce<{ free: number; at: Date } | null>((acc, d) => (acc === null || d.free < acc.free ? d : acc), null);
     out.push(
       statHtml(String(daysBelow), `de ${list.length} dies`, `dies amb menys de ${pt} lliures`, list.length ? `${pct1((100 * daysBelow) / list.length)} % dels dies complets` : "encara cap dia complet", daysBelow > 0),
       statHtml(totalMinutes ? pct1((100 * belowMinutes) / totalMinutes) : "–", totalMinutes ? "%" : "","del temps sota el llindar", totalMinutes ? `${belowMinutes.toLocaleString("ca")} de ${totalMinutes.toLocaleString("ca")} minuts` : "", belowMinutes > 0),
-      worst ? statHtml(String(worst.min_free), "lliures", "mínim del període", `${fmtDay.format(new Date(worst.min_at_utc))} a les ${fmtTime.format(new Date(worst.min_at_utc))}`, worst.min_free < pt) : statHtml("–", "", "mínim del període"),
+      worst ? statHtml(String(worst.free), "lliures", "mínim del període", `${fmtDay.format(worst.at)} a les ${fmtTime.format(worst.at)}`, worst.free < pt) : statHtml("–", "", "mínim del període"),
     );
   }
   $("#sr-stats").innerHTML = out.join("");
