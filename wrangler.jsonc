@@ -26,6 +26,9 @@
   },
 
   "vars": {
-    "LOCAL_TZ": "Europe/Madrid"
+    "LOCAL_TZ": "Europe/Madrid",
+    // D'on surten els CSV mensuals (/data/AAAA-MM.csv): els munta cada matinada
+    // la GitHub Action de còpia a la branca `data`. En un fork, apunteu-ho al vostre.
+    "DATA_MIRROR_URL": "https://raw.githubusercontent.com/marcgallego/parking_terrassa/data/data"
   }
 }

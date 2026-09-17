@@ -2,7 +2,7 @@
   "profile": "tabular-data-package",
   "name": "parking-saba-terrassa",
   "title": "Ocupació dels pàrquings Saba de Terrassa",
-  "description": "Sèrie temporal amb resolució d'1 minut de places totals i disponibles dels tres pàrquings Saba de Terrassa (Plaça Vella, Ajuntament-Mercat i Dr. Robert), obtinguda de les fitxes públiques de saba.es. Els fitxers es generen sota demanda: /data/AAAA-MM-DD.csv (un dia) i /data/AAAA-MM.csv (un mes).",
+  "description": "Sèrie temporal amb resolució d'1 minut de places totals i disponibles dels tres pàrquings Saba de Terrassa (Plaça Vella, Ajuntament-Mercat i Dr. Robert), obtinguda de les fitxes públiques de saba.es. Els fitxers diaris (/data/AAAA-MM-DD.csv) es generen sota demanda; els mensuals (/data/AAAA-MM.csv) es munten cada matinada concatenant els diaris, de manera que el del mes en curs arriba fins a l'última còpia (normalment, el dia anterior). Totes dues formes tenen les mateixes columnes.",
   "licenses": [
     {
       "name": "CC-BY-4.0",
