@@ -57,6 +57,15 @@ export function showTip(html: string, x: number, y: number): void {
 }
 export const hideTip = (): void => { if (tipEl) tipEl.hidden = true; };
 
+// Amb el dit no hi ha «treure el ratolí de sobre»: l'etiqueta s'amaga en
+// desplaçar-se o en tocar fora d'un gràfic, que si no es quedaria enganxada.
+window.addEventListener("scroll", hideTip, { passive: true });
+document.addEventListener("pointerdown", (ev) => {
+  if (ev.pointerType === "mouse") return;
+  const el = ev.target;
+  if (!(el instanceof Element) || !el.closest(".u-over, .heat")) hideTip();
+}, true);
+
 export const tipRow = (label: string, value: string, color?: string): string =>
   `<div class="row"><span>${color ? `<i style="background:${color}"></i>` : ""}${esc(label)}</span><span>${esc(value)}</span></div>`;
 
@@ -108,21 +117,24 @@ export function chips<T extends string>(param: string, allowed: readonly T[], fa
       b.setAttribute("aria-pressed", String(on));
     }
   };
-  for (const b of buttons) {
-    b.addEventListener("click", () => {
-      const v = allowed.find((a) => a === b.dataset[param]);
-      if (v === undefined || v === value) return;
-      value = v;
-      sync();
-      const url = new URL(location.href);
-      if (v === fallback) url.searchParams.delete(param); else url.searchParams.set(param, v);
-      history.replaceState(null, "", url);
-      onChange(v);
-    });
-  }
+  const select = (v: T | undefined): void => {
+    if (v === undefined || v === value) return;
+    value = v;
+    sync();
+    const url = new URL(location.href);
+    if (v === fallback) url.searchParams.delete(param); else url.searchParams.set(param, v);
+    history.replaceState(null, "", url);
+    onChange(v);
+  };
+  for (const b of buttons) b.addEventListener("click", () => { select(allowed.find((a) => a === b.dataset[param])); });
+  setters.set(param, (v) => { select(allowed.find((a) => a === v)); });
   sync();
   return value;
 }
+
+const setters = new Map<string, (v: string) => void>();
+/** Canvia el valor d'un grup de botons des de fora (per exemple, en fer clic en un gràfic). */
+export const setChip = (param: string, value: string): void => { setters.get(param)?.(value); };
 
 // ----- estat de la captura ---------------------------------------------------
 /** Pinta l'indicador «en viu» a partir de l'instant (ms) de l'última lectura, o 0 si no n'hi ha. */

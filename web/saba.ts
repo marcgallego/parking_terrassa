@@ -192,14 +192,17 @@ async function loadHeat(weeks: Weeks): Promise<void> {
 
 function bindHeatTooltip(): void {
   const heat = $("#heatmaps");
-  heat.addEventListener("mousemove", (ev) => {
-    const c = (ev.target as Element | null)?.closest<HTMLElement>(".cell");
+  const showCell = (target: EventTarget | null, x: number, y: number): void => {
+    const c = (target as Element | null)?.closest<HTMLElement>(".cell");
     if (!c) { hideTip(); return; }
     const slug = c.dataset.slug as Slug, d = Number(c.dataset.d), h = Number(c.dataset.h), v = c.dataset.v;
     const body = v ? tipRow("ocupació mitjana", `${pct1(Number(v))} %`) + tipRow("lectures", c.dataset.n ?? "") : "Sense dades";
-    showTip(`<b>${NAMES[slug]} · ${DOW_LONG[d]} ${pad2(h)}:00–${pad2(h + 1)}:00</b>${body}`, ev.clientX, ev.clientY);
-  });
+    showTip(`<b>${NAMES[slug]} · ${DOW_LONG[d]} ${pad2(h)}:00–${pad2(h + 1)}:00</b>${body}`, x, y);
+  };
+  heat.addEventListener("mousemove", (ev) => { showCell(ev.target, ev.clientX, ev.clientY); });
   heat.addEventListener("mouseleave", hideTip);
+  // Amb el dit no hi ha «passar per sobre»: un toc mostra la cel·la tocada.
+  heat.addEventListener("pointerdown", (ev) => { if (ev.pointerType !== "mouse") showCell(ev.target, ev.clientX, ev.clientY); });
 }
 
 // ----- descàrregues ----------------------------------------------------------
