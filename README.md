@@ -35,7 +35,7 @@ Tot el codi és TypeScript en mode estricte.
 
 ## Per què: el Portal de Sant Roc
 
-El projecte vol respondre si cal un pàrquing nou al Portal de Sant Roc. Els dos pàrquings a tocar són Ajuntament-Mercat i Plaça Vella (534 places entre tots dos); Dr. Robert és context. La portada del dashboard, [«Cal un altre pàrquing al centre?»](https://parking.terrassa.workers.dev/), mostra, per a aquests dos, les places lliures sumades minut a minut, el mínim de cada dia i quants dies i minuts han baixat d'un llindar (10, 25 o 50 places). Si al pitjor moment de cada dia encara queden places, l'oferta actual absorbeix la demanda. Les dades públiques, però, cobreixen els tres pàrquings.
+El projecte vol respondre si cal un pàrquing nou al Portal de Sant Roc. Els dos pàrquings a tocar són Ajuntament-Mercat i Plaça Vella (534 places entre tots dos); Dr. Robert és context. La portada del dashboard, [«Cal un altre pàrquing al centre?»](https://parking.terrassa.workers.dev/), mostra, per a aquests dos, les places lliures sumades minut a minut —d'avui o de qualsevol dia passat, i també la mitjana per hora dels últims 7 o 30 dies—, el mínim de cada dia i quants dies i minuts han baixat d'un llindar (10, 25 o 50 places). Si al pitjor moment de cada dia encara queden places, l'oferta actual absorbeix la demanda. Les dades públiques, però, cobreixen els tres pàrquings.
 
 Cauteles: les «places disponibles» de Saba potser només compten les de rotació, i l'ocupació mesura oferta, no si el preu expulsa demanda. Els dies especials (Fira Modernista, Festa Major, Nadal) són els que cal mirar amb més atenció.
 
