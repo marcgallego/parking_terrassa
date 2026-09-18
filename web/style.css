@@ -12,8 +12,8 @@
   --series-1: #2a78d6;   /* Plaça Vella */
   --series-2: #c08600;   /* Ajuntament-Mercat */
   --series-3: #1baf7a;   /* Dr. Robert */
-  --seq-lo: #cde2fb;
-  --seq-hi: #0d366b;
+  --seq-stops: #fdf2b8, #fed873, #feb54b, #fb8437, #ee5122, #d3212f, #a30b3b, #6e0538;
+  --seq-lo: #fdf2b8;
   --meter-track: #e6eef9;
   --good: #008300;
   --bad: #e34948;
@@ -33,8 +33,8 @@
     --series-1: #3987e5;
     --series-2: #e0a838;
     --series-3: #199e70;
-    --seq-lo: #1c3556;
-    --seq-hi: #9ec5f4;
+    --seq-stops: #3b1063, #6a1a76, #93227b, #bb3175, #dd4a6a, #f26d5b, #fb9a63, #fdc98a;
+    --seq-lo: #3b1063;
     --meter-track: #26313f;
     --good: #35b535;
     --bad: #e66767;
@@ -48,7 +48,7 @@
   --surface-0: #111110; --surface-1: #1a1a19; --line: #2e2e2c; --grid: #262624;
   --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #8f8e88;
   --series-1: #3987e5; --series-2: #e0a838; --series-3: #199e70;
-  --seq-lo: #1c3556; --seq-hi: #9ec5f4; --meter-track: #26313f;
+  --seq-stops: #3b1063, #6a1a76, #93227b, #bb3175, #dd4a6a, #f26d5b, #fb9a63, #fdc98a; --seq-lo: #3b1063; --meter-track: #26313f;
   --good: #35b535; --bad: #e66767; --chip-on: #ffffff; --chip-on-text: #0b0b0b;
 }
 * { box-sizing: border-box; }
@@ -156,7 +156,7 @@ footer { color: var(--text-muted); font-size: 0.85rem; margin-top: 24px; padding
 .heat .rl { font-size: 0.75rem; color: var(--text-muted); align-self: center; }
 .heat .cl { font-size: 0.7rem; color: var(--text-muted); text-align: center; }
 .ramp { display: flex; align-items: center; gap: 8px; font-size: 0.75rem; color: var(--text-muted); margin-top: 8px; }
-.ramp i { flex: 0 0 140px; height: 8px; border-radius: 4px; background: linear-gradient(90deg, var(--seq-lo), var(--seq-hi)); }
+.ramp i { flex: 0 0 140px; height: 8px; border-radius: 4px; background: linear-gradient(90deg, var(--seq-stops)); }
 
 /* ----- Portal de Sant Roc ----- */
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 12px; }
