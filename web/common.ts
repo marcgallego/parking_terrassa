@@ -87,11 +87,22 @@ export function alpha(hex: string, a: number): string {
   return `rgba(${hexToRgb(hex).join(",")},${a})`;
 }
 
-let seqLo = "#cde2fb", seqHi = "#0d366b";
-function refreshRamp(): void { seqLo = cssVar("--seq-lo") || seqLo; seqHi = cssVar("--seq-hi") || seqHi; }
+// Rampa seqüencial multi-to: canvia de color a cada tram (groc→taronja→vermell→granat en
+// clar, lila→magenta→taronja→crema en fosc) però sempre en un sol sentit de lluminositat,
+// perquè l'ordre es llegeixi igual en blanc i negre i amb daltonisme.
+const RAMP_FALLBACK = ["#fdf2b8", "#fed873", "#feb54b", "#fb8437", "#ee5122", "#d3212f", "#a30b3b", "#6e0538"];
+let ramp = RAMP_FALLBACK;
+function refreshRamp(): void {
+  const stops = cssVar("--seq-stops").split(",").map((s) => s.trim()).filter((s) => /^#[0-9a-f]{6}$/i.test(s));
+  ramp = stops.length >= 2 ? stops : RAMP_FALLBACK;
+}
 refreshRamp();
-/** Escala seqüencial clar→fosc per a valors entre 0 i 1. */
-export const seq = (t: number): string => mix(seqLo, seqHi, Math.max(0, Math.min(1, t)));
+/** Escala seqüencial per a valors entre 0 i 1: interpola dins la rampa del tema actiu. */
+export function seq(t: number): string {
+  const pos = Math.max(0, Math.min(1, t)) * (ramp.length - 1);
+  const i = Math.min(Math.floor(pos), ramp.length - 2);
+  return mix(ramp[i] ?? RAMP_FALLBACK[0]!, ramp[i + 1] ?? RAMP_FALLBACK.at(-1)!, pos - i);
+}
 
 const themeListeners: (() => void)[] = [];
 /** Crida `cb` quan el sistema canvia de tema clar/fosc (els canvas s'han de redibuixar). */
