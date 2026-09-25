@@ -1,0 +1,35 @@
+# Web pública a Netlify.
+#
+# Durant els partits de LaLiga, els operadors espanyols bloquegen adreces IP de
+# Cloudflare, i amb elles parking.terrassa.workers.dev: des d'una connexió
+# espanyola, el dashboard no carrega. Netlify serveix les pàgines (public/) i
+# passa /api/* i /data/* al Worker des dels seus servidors, de manera que el
+# navegador no es connecta mai a Cloudflare. La captura, D1 i l'API continuen
+# al Worker: el bloqueig només afecta qui s'hi connecta des d'Espanya.
+
+[build]
+  # El mateix que fa `npm run deploy` abans de publicar: tipus, proves i build.
+  command = "npm run check"
+  publish = "public"
+  # Al pla gratuït de Netlify, cada publicació a producció gasta crèdits. Si el
+  # commit no toca res del que es publica, no es compila. Quan les dues
+  # referències coincideixen (la primera compilació, un reintent a mà) sí.
+  ignore = '[ "$CACHED_COMMIT_REF" != "$COMMIT_REF" ] && git diff --quiet "$CACHED_COMMIT_REF" "$COMMIT_REF" -- public web shared package.json package-lock.json tsconfig.json netlify.toml'
+
+[build.environment]
+  NODE_VERSION = "22"
+
+# L'API i les dades són del Worker, com `run_worker_first` a wrangler.jsonc.
+# `force` perquè cap fitxer estàtic no les pugui tapar. Els paràmetres de la
+# consulta, l'estat (el 503 de /api/status) i les capçaleres passen tal com són.
+[[redirects]]
+  from = "/api/*"
+  to = "https://parking.terrassa.workers.dev/api/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/data/*"
+  to = "https://parking.terrassa.workers.dev/data/:splat"
+  status = 200
+  force = true

@@ -100,5 +100,5 @@
       "description": "Identificador, nom, URL d'origen, capacitat i coordenades de cada pàrquing."
     }
   ],
-  "homepage": "https://parking.terrassa.workers.dev"
+  "homepage": "https://parking-terrassa.netlify.app"
 }
