@@ -11,9 +11,10 @@
   # El mateix que fa `npm run deploy` abans de publicar: tipus, proves i build.
   command = "npm run check"
   publish = "public"
-  # Al pla gratuït de Netlify, cada publicació a producció gasta crèdits. Si el
-  # commit no toca res del que es publica, no es compila. Quan les dues
-  # referències coincideixen (la primera compilació, un reintent a mà) sí.
+  # Als comptes de Netlify amb crèdits, cada publicació a producció en gasta; als
+  # antics, cada compilació gasta minuts de build. Si el commit no toca res del
+  # que es publica, no es compila. Quan les dues referències coincideixen (la
+  # primera compilació, un reintent a mà) sí.
   ignore = '[ "$CACHED_COMMIT_REF" != "$COMMIT_REF" ] && git diff --quiet "$CACHED_COMMIT_REF" "$COMMIT_REF" -- public web shared package.json package-lock.json tsconfig.json netlify.toml'
 
 [build.environment]

@@ -36,9 +36,9 @@ jobs:
           exit 1
 
       # La web pública és a Netlify, que passa /api/* al Worker. Es comprova a
-      # part: si Netlify aturés el projecte (per exemple, perquè s'han acabat els
-      # crèdits del pla gratuït), la captura continuaria bé i el pas anterior no
-      # se n'adonaria. Corre encara que aquell falli, per saber-ho tot alhora.
+      # part: si Netlify aturés el projecte (per exemple, en arribar al límit del
+      # pla gratuït), la captura continuaria bé i el pas anterior no se
+      # n'adonaria. Corre encara que aquell falli, per saber-ho tot alhora.
       - name: Consulta la web pública
         if: ${{ !cancelled() }}
         env:
