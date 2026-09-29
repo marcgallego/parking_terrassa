@@ -1,8 +1,10 @@
 # Ocupació dels pàrquings Saba de Terrassa
 
-Dataset obert amb l'ocupació, minut a minut, dels tres pàrquings Saba de Terrassa, amb dashboard i API. Corre íntegrament a Cloudflare (Workers + D1), sense servidor propi.
+Dataset obert amb l'ocupació, minut a minut, dels tres pàrquings Saba de Terrassa, amb dashboard i API. La captura, les dades i l'API corren a Cloudflare (Workers + D1) i la web es publica a Netlify, sense cap servidor propi.
 
-**Dashboard i dades**: https://parking.terrassa.workers.dev
+**Dashboard i dades**: https://parking-terrassa.netlify.app
+
+L'adreça del Worker, https://parking.terrassa.workers.dev, també respon, però durant els partits de LaLiga pot no carregar des d'Espanya: vegeu [Netlify i els bloquejos de LaLiga](#netlify-i-els-bloquejos-de-laliga).
 
 | slug | Pàrquing | Places | id Saba |
 |---|---|---|---|
@@ -17,9 +19,11 @@ Font: fitxes públiques de [saba.es](https://www.saba.es/ca/parking-terrassa), q
 ```
 Cron "* * * * *"  ─► Worker: descarrega les 3 fitxes, en parseja l'ocupació ─► D1 (taula readings)
 Cron "7 * * * *"  ─► Worker: agrega les últimes hores ─► D1 (taula hourly)
+Netlify /            ─► dashboard estàtic (public/)
+Netlify /api/*, /data/* ─► es passen tal com són al Worker
 HTTP /api/*, /data/*  ─► Worker: JSON i CSV des de D1 (cache a la vora)
 HTTP /data/AAAA-MM.csv ─► Worker: passa el CSV mensual de la branca data, sense llegir D1
-HTTP /               ─► Assets estàtics: dashboard (public/)
+HTTP /               ─► Assets estàtics del Worker: la mateixa còpia del dashboard (public/)
 GitHub Action 01:20 UTC ─► branca data: CSV del dia anterior i CSV del mes, concatenat
 ```
 
@@ -28,14 +32,15 @@ Tot el codi és TypeScript en mode estricte.
 - `src/index.ts`: Worker (captura, agregat, API). Wrangler el compila directament.
 - `shared/api.ts`: contracte de l'API. L'importen tant el Worker (que el produeix) com el dashboard (que el consumeix), de manera que canviar un camp trenca la compilació en lloc del dashboard en execució.
 - `web/`: dashboard, en dues pàgines. `santroc.ts` és la portada (`/`: «Cal un altre pàrquing al centre?», amb les places lliures a prop del Portal de Sant Roc) i `saba.ts` la dels pàrquings Saba (`/saba`: tiles d'estat, ocupació, patró setmanal, descàrregues). Comparteixen `common.ts` (formats, filtres, tooltip), `charts.ts` (gràfics amb [uPlot](https://github.com/leeoniya/uPlot)), `series.ts`, `api.ts` i `style.css`. `esbuild` ho compila a `public/build/`, amb uPlot en un fragment compartit.
-- `public/`: les dues pàgines HTML (`index.html`, `saba.html`), `_redirects` (`/sant-roc` → `/`) i `datapackage.json`, servits com a assets estàtics.
+- `public/`: les dues pàgines HTML (`index.html`, `saba.html`), `_redirects` (`/sant-roc` → `/`) i `datapackage.json`, servits com a assets estàtics, tant per Netlify com pel Worker.
+- `netlify.toml`: publicació a Netlify (build i reenviament de `/api/*` i `/data/*` al Worker).
 - `migrations/`: esquema D1.
 - `test/`: proves del Worker amb el runner de Node (`node --test`), sense cap dependència afegida.
 - `local-scraper/`: versió Python autònoma per a qui vulgui capturar en una màquina pròpia.
 
 ## Per què: el Portal de Sant Roc
 
-El projecte vol respondre si cal un pàrquing nou al Portal de Sant Roc. Els dos pàrquings a tocar són Ajuntament-Mercat i Plaça Vella (534 places entre tots dos); Dr. Robert és context. La portada del dashboard, [«Cal un altre pàrquing al centre?»](https://parking.terrassa.workers.dev/), mostra, per a aquests dos, les places lliures sumades minut a minut —d'avui o de qualsevol dia passat, i també la mitjana per hora dels últims 7 o 30 dies—, el mínim de cada dia i quants dies i minuts han baixat d'un llindar (10, 25 o 50 places). Si al pitjor moment de cada dia encara queden places, l'oferta actual absorbeix la demanda. Les dades públiques, però, cobreixen els tres pàrquings.
+El projecte vol respondre si cal un pàrquing nou al Portal de Sant Roc. Els dos pàrquings a tocar són Ajuntament-Mercat i Plaça Vella (534 places entre tots dos); Dr. Robert és context. La portada del dashboard, [«Cal un altre pàrquing al centre?»](https://parking-terrassa.netlify.app/), mostra, per a aquests dos, les places lliures sumades minut a minut —d'avui o de qualsevol dia passat, i també la mitjana per hora dels últims 7 o 30 dies—, el mínim de cada dia i quants dies i minuts han baixat d'un llindar (10, 25 o 50 places). Si al pitjor moment de cada dia encara queden places, l'oferta actual absorbeix la demanda. Les dades públiques, però, cobreixen els tres pàrquings.
 
 Cauteles: les «places disponibles» de Saba potser només compten les de rotació, i l'ocupació mesura oferta, no si el preu expulsa demanda. Els dies especials (Fira Modernista, Festa Major, Nadal) són els que cal mirar amb més atenció.
 
@@ -108,7 +113,14 @@ L'excepció és `/api/status`, que no es cacheja: les seves consultes ja estan a
 
 La cache és per centre de dades, així que amb visites repartides l'estalvi és gran però no exacte.
 
-> **La cache no funciona a `workers.dev`.** Cloudflare documenta que les operacions de la Cache API no tenen cap efecte als desplegaments `*.workers.dev`: la cache és de zona i a `workers.dev` seria compartida entre tothom, de manera que només els Workers amb un domini propi hi tenen accés. Mentre el dashboard es publiqui a `parking.terrassa.workers.dev`, doncs, **tot això que acabem de descriure no passa**: cada petició llega D1, i la despesa torna a dependre del nombre de visites. És la primera cosa que cal arreglar si s'esgoten les lectures, i és de configuració, no de codi: posar el Worker a un domini propi (una `route` o un Custom Domain d'una zona del compte). Per comprovar-ho, `curl -sI https://<host>/api/parkings | grep -i cf-cache-status` i repetir-ho: amb la cache activa, la segona resposta ha de sortir com a `HIT`.
+> **Ara mateix no hi ha cache enlloc, i és el que cal arreglar si s'esgoten les lectures.** Són dues coses que se sumen, i cap de les dues és de codi d'aquest fitxer:
+>
+> 1. **Al Worker.** Cloudflare documenta que les operacions de la Cache API [no tenen cap efecte als desplegaments `*.workers.dev`](https://developers.cloudflare.com/workers/cache/limitations/): la cache és de zona i allà seria compartida entre tothom, de manera que només els Workers amb un domini propi hi tenen accés. Com que `wrangler.jsonc` no té cap `route`, **tot el `withCache` que acabem de descriure és un no-op**.
+> 2. **A Netlify.** Les respostes que Netlify fa de proxy [no es cachegen per defecte](https://docs.netlify.com/build/caching/caching-overview/): cal que la resposta porti `Netlify-CDN-Cache-Control`, i el Worker no l'emet. El `Cache-Control` que sí que posa només el fa servir el navegador.
+>
+> Amb les dues juntes, cada petició del dashboard arriba fins a D1: navegador → Netlify → Worker → D1. La despesa depèn del nombre de visites en comptes d'estar-ne desacoblada, i **una sola pestanya oberta tot el dia són uns 3,9 milions de files llegides** de les 5 disponibles. També gasta crèdits de Netlify, que ara compten les peticions de l'API.
+>
+> Les dues sortides: emetre `Netlify-CDN-Cache-Control` des del Worker (aprofita el proxy que ja hi ha, i la cache de Netlify és global i no per centre de dades), o posar el Worker a un domini propi (activa el `withCache` tal com està escrit). Per comprovar on som, `curl -sI https://<host>/api/parkings` repetit dues vegades: amb la cache de Netlify, `Cache-Status` ha de dir `hit`; amb la de Cloudflare, `cf-cache-status: HIT`.
 
 L'altre límit és el de CPU: 10 ms per petició al pla gratuït. Una resposta que el supera no arriba a sortir del Worker: Cloudflare la talla amb l'error 1102 i el client rep un **503** amb el cos `error code: 1102`, no el 500 dels errors del Worker. Per veure-ho en directe, `npx wrangler tail --format json` mostra `"outcome": "exceededCpu"` i el `cpuTime` de cada petició.
 
@@ -120,6 +132,27 @@ Es va descartar muntar el mes al Worker a partir dels dies que ja són a la cach
 
 Si tot i així s'esgotessin les lectures, la captura continuaria: només escriu. El que s'aturaria fins a mitjanit UTC és el dashboard, l'API i l'agregat horari.
 
+## Netlify i els bloquejos de LaLiga
+
+Des del febrer del 2025, durant els partits de LaLiga, Movistar, Vodafone, Orange i DIGI bloquegen les adreces IP que LaLiga relaciona amb retransmissions pirates, emparats per una ordre judicial que cobreix fins a la temporada 2026-2027. Moltes són adreces compartides de Cloudflare, i amb cadascuna cauen milers de webs que no hi tenen res a veure. Aquesta n'era una: mentre dura el partit, `parking.terrassa.workers.dev` no carrega des d'una connexió espanyola.
+
+Per això la web pública és a Netlify. Les pàgines (`public/`) es publiquen allà i `netlify.toml` hi reenvia `/api/*` i `/data/*` al Worker. El navegador només es connecta a Netlify; les peticions al Worker les fan els servidors de Netlify, i el bloqueig només s'aplica a les connexions dels clients dels operadors espanyols. Les capçaleres, l'estat (el 503 de `/api/status`) i els paràmetres de la consulta arriben tal com són, i el control de lectures de D1 continua al Worker (la cache a la vora, però, no s'arriba a fer: vegeu l'avís de [Desplegament a Cloudflare](#desplegament-a-cloudflare)). La resta no en depèn: la captura va de Cloudflare a saba.es, D1 és interna i les GitHub Actions corren fora d'Espanya.
+
+Netlify no n'està lliure —també n'hi han bloquejat adreces—, però el gruix és a Cloudflare: segons [OONI](https://ooni.org/post/2026-laliga-collateral/), entre el gener i el juny del 2026 hi eren el 90 % dels dominis afectats. Si algun dia cau l'adreça de Netlify, falla la pàgina, no la captura. El Worker continua servint la seva còpia del dashboard, que queda de reserva.
+
+Posada en marxa, un sol cop:
+
+1. A Netlify, crear un projecte a partir d'aquest repositori de GitHub, amb la branca `main`. Tota la configuració (ordre de build, directori `public`, versió de Node i reenviaments) és a `netlify.toml`: no cal omplir res.
+2. Canviar el nom del projecte a `parking-terrassa`, que en fa l'adreça `https://parking-terrassa.netlify.app`. Amb un altre nom, cal canviar l'adreça també en aquest README, a `public/datapackage.json` i a `.github/workflows/health.yml`.
+3. En un fork, apunteu els dos `to` de `netlify.toml` al vostre Worker.
+
+Coses a tenir en compte:
+
+- **Límits del pla gratuït**: depenen de quan es va crear el compte de Netlify. Els comptes creats des del 4 de setembre del 2025 van amb crèdits: 300 al mes, i al setembre del 2026 cada publicació a producció en gasta 15, cada GB servit 20 i cada 10.000 peticions 2, incloses les de l'API, que ara passen per Netlify. Si s'acaben, Netlify atura tots els projectes del compte fins al mes següent. Els comptes anteriors conserven el pla antic: 100 GB de trànsit i 300 minuts de build al mes, sense comptar publicacions ni peticions. Per a aquest projecte és molt més ampli, i passar-se al de crèdits no té marxa enrere. Per això `netlify.toml` no torna a publicar si el commit no toca res del que es publica (`public/`, `web/`, `shared/`, dependències), i la feina `Salut de la captura` comprova també que la web respongui.
+- **Ordre de publicació**: Netlify publica cada push a `main`, i el Worker es publica pel seu compte (amb `npm run deploy` o amb la integració de Git de Cloudflare), sense cap ordre garantit entre tots dos. Si un canvi toca el contracte de l'API (`shared/api.ts`), publiqueu el Worker abans de fusionar-lo (`npm run deploy` des de la branca), perquè la pàgina nova no demani res que el Worker encara no doni.
+- **Previsualitzacions**: cada pull request que toca el dashboard té una adreça de prova a Netlify, amb les dades de producció.
+- **Desenvolupament**: durant un partit, des d'Espanya, `npm run dev:prod` tampoc no arriba al Worker; `UPSTREAM=https://parking-terrassa.netlify.app npm run dev:prod` hi arriba a través de Netlify.
+
 ## Integritat de les dades
 
 - **Escriptures idempotents**: la clau primària de `readings` és (minut, pàrquing) i s'escriu amb `INSERT OR REPLACE`. Dues execucions del mateix minut no dupliquen res. Els agregats horaris i diaris es recalculen sencers i també són idempotents.
@@ -128,9 +161,9 @@ Si tot i així s'esgotessin les lectures, la captura continuaria: només escriu.
 - **Disponibilitat no publicada**: a estones, saba.es serveix el bloc amb la capacitat total sola, sense la meitat de «Places disponibles» —no és un format estrany, és una dada que no han publicat—, en ràfegues d'entre un i cinc minuts. Aquest cas es distingeix dels altres (l'error ho diu: «el bloc no porta 'Places disponibles'») i és l'únic que es reintenta, un sol cop, cinc segons després. Si el segon intent tampoc no la porta, el minut queda buit i es desa el tros de pàgina. Un error HTTP, un temps d'espera o un format desconegut no es reintenten: repetir-los no els arregla.
 - **Els forats de l'agregat es tapen sols**: l'agregat horari recalcula les 3 últimes hores a cada execució, però una finestra curta no recupera res: si les lectures no es poden llegir durant unes hores (per exemple perquè s'ha esgotat la quota de D1), aquelles hores no s'agregarien mai i `hourly` —d'on surten el mapa de calor, els gràfics de setmanes i mesos i el llistat de dies— quedaria amb un forat permanent. Per això, un cop al dia, es repassa una finestra de 48 hores.
 - **Consultes acotades**: els gràfics de setmanes i mesos llegeixen la taula `hourly`; el panell del Portal de Sant Roc llegeix `daily_santroc` (una fila per dia) i només calcula en viu el dia d'avui. `/api/status`, que es consulta dues vegades cada hora (el cron i la feina de GitHub Actions), també ho està: `MAX(ts)` i `MIN(ts)` van en consultes separades —juntes, SQLite no pot fer servir l'índex i recorre tota la taula— i el recompte de lectures és el del dia, per `idx_readings_local_date`. L'únic recompte total es fa només si es demana amb `?totals=1`. El llistat de dies s'acota pel `hour_ts`: el `LIMIT` sol no evitava res, perquè s'aplica després d'agrupar i la consulta recorria `hourly` sencera (`SCAN`), una mica més cara cada dia que passa; pel `hour_ts`, que és el primer camp de la clau primària, és un recorregut de rang (`SEARCH`). Amb dades seguides el resultat és el mateix; si hi ha forats, `/api/days` passa a voler dir «els dies amb dades dels últims 400» i no «els últims 400 dies amb dades».
-- **Còpia fora de Cloudflare**: cada matinada una GitHub Action baixa el CSV del dia anterior i el desa a la branca [`data`](https://github.com/marcgallego/parking_terrassa/tree/data) d'aquest repositori. Hi torna a muntar també el CSV del mes (la capçalera una sola vegada i els dies en ordre), que és el que serveix `/data/AAAA-MM.csv`: si algun CSV diari té una capçalera diferent la feina falla, i si hi falta algun dia, ho avisa. A més, D1 conserva 30 dies d'historial (Time Travel) per restaurar la base de dades a qualsevol instant amb `wrangler d1 time-travel restore`.
+- **Còpia fora de Cloudflare**: cada matinada una GitHub Action baixa el CSV del dia anterior i el desa a la branca [`data`](https://github.com/marcgallego/parking_terrassa/tree/data) d'aquest repositori. Hi torna a muntar també el CSV del mes (la capçalera una sola vegada i els dies en ordre), que és el que serveix `/data/AAAA-MM.csv`: si algun CSV diari té una capçalera diferent la feina falla, i si hi falta algun dia, ho avisa. Si la branca no existeix (la primera vegada, en un fork o si s'ha esborrat), la feina la crea en lloc de fallar. Va passar el setembre de 2026: la branca es va esborrar en una neteja de branques i, durant més d'una setmana, la còpia va fallar cada dia i `/data/AAAA-MM.csv` responia 404. Els dies que falten es recuperen llançant la feina a mà amb `day` i `until`, el primer i l'últim dia de l'interval (*Run workflow* a la pestanya Actions, o `gh workflow run backup-data.yml -f day=AAAA-MM-DD -f until=AAAA-MM-DD`): els baixa tots, torna a muntar els mesos afectats i ho desa en un sol commit. A més, D1 conserva 30 dies d'historial (Time Travel) per restaurar la base de dades a qualsevol instant amb `wrangler d1 time-travel restore`.
 - **La capacitat no es dóna per fixa**: les places totals d'un pàrquing poden canviar (places reservades a abonats, una planta tancada per obres). Cada lectura desa la capacitat que saba.es publicava en aquell moment, de manera que el CSV sempre és fidel. A més, cada hora es reconcilia la fitxa de `parkings` amb la capacitat dominant de les últimes 24 h —cal que hi hagi almenys 60 lectures coincidents, per no oscil·lar amb un minut estrany—, i així `/api/parkings` i el denominador del panell del Portal de Sant Roc no es queden congelats. Cada transició distinta deixa una fila a `capacity_changes`, i `/api/status` avisa mentre la constant `PARKINGS` del Worker no coincideixi amb el que s'està llegint.
-- **Vigilància**: `/api/status` respon 503 si fa 15 minuts o més que no s'escriu cap lectura, si hi ha errors de captura a l'última hora o si la capacitat publicada no coincideix amb la que el Worker espera. La feina `Salut de la captura` de GitHub Actions ho consulta cada hora i falla (i per tant avisa) si alguna cosa no va bé. Opcionalment, amb `npx wrangler secret put ALERT_WEBHOOK` el Worker envia també un POST a l'URL que li indiqueu. El cos porta el mateix missatge amb els dos noms de camp habituals —`text`, que fan servir Slack i Telegram, i `content`, que fa servir Discord— i l'estat complet imbricat sota `health`. Per a Telegram, l'URL és `https://api.telegram.org/bot<TOKEN>/sendMessage?chat_id=<ID>`, amb el testimoni que dóna @BotFather.
+- **Vigilància**: `/api/status` respon 503 si fa 15 minuts o més que no s'escriu cap lectura, si hi ha errors de captura a l'última hora o si la capacitat publicada no coincideix amb la que el Worker espera. La feina `Salut de la captura` de GitHub Actions ho consulta cada hora i falla (i per tant avisa) si alguna cosa no va bé. També comprova que la web de Netlify serveixi el dashboard i passi l'API al Worker: si Netlify aturés el projecte (per exemple, en arribar al límit del pla gratuït), la captura continuaria bé i `/api/status` no ho detectaria. Opcionalment, amb `npx wrangler secret put ALERT_WEBHOOK` el Worker envia també un POST a l'URL que li indiqueu. El cos porta el mateix missatge amb els dos noms de camp habituals —`text`, que fan servir Slack i Telegram, i `content`, que fa servir Discord— i l'estat complet imbricat sota `health`. Per a Telegram, l'URL és `https://api.telegram.org/bot<TOKEN>/sendMessage?chat_id=<ID>`, amb el testimoni que dóna @BotFather.
 
 Compte: l'avís només s'envia des del manteniment horari i només si alguna cosa va malament, de manera que arriba al minut 7 de cada hora. La feina de GitHub Actions comprova el mateix al minut 5 i, si falla, GitHub ja us avisa per correu; el webhook només val la pena si voleu l'avís en un canal de xat.
 - **Migracions**: només afegeixen taules (`CREATE TABLE IF NOT EXISTS`); cap no esborra ni modifica dades. Cal aplicar-les a mà amb `npm run db:migrate` abans de desplegar codi que les necessiti.
