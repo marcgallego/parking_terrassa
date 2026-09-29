@@ -76,12 +76,45 @@ const HOURLY_CATCHUP_HOURS = 48;
  */
 const DERIVED_FROM_HOURLY_TTL = 900;
 /**
- * Dies que llista `/api/days`. Acota també el recorregut de `hourly`: el rang es
- * demana amb un dia de marge (els `hour_ts` són UTC i els dies, locals), de
- * manera que el dia més antic que en queda dins pot sortir a mitges però el
- * `LIMIT` el descarta, i els que es llisten són tots sencers.
+ * Marge que es dona a una lectura per arribar tard abans de congelar el tros
+ * tancat del dia en curs (vegeu `daySeries`). La captura de l'últim minut d'una
+ * hora es pot desar ja passada l'hora: un cron endarrerit, o el reintent de
+ * cinc segons de `MISSING_AVAILABILITY_RETRY_MS`. Cinc minuts cobreixen
+ * folgadament tots dos casos.
+ *
+ * Fer-lo més gran té preu: el tros viu s'allarga i es rellegeix a cada petició.
+ * Amb una hora de marge la consulta passava d'unes 88 files de mitjana a unes
+ * 268, que són unes 260.000 files més al dia i per centre de dades. Una lectura
+ * que arribi més tard que el marge no es perd —hi és a D1, i als CSV i als dies
+ * passats—, però no surt a la sèrie del dia en curs fins al tall de l'hora
+ * següent.
+ */
+const LATE_WRITE_GRACE_S = 300;
+/**
+ * Dies que llista `/api/days`, i alhora l'acotament del recorregut de `hourly`.
+ *
+ * El `LIMIT` sol no evitava res: s'aplica després d'agrupar, així que la
+ * consulta recorria `hourly` sencera (`SCAN`) i cada dia nou la feia una mica
+ * més cara, per sempre. Acotar-la pel `hour_ts` —que és el primer camp de la
+ * clau primària— la converteix en un recorregut de rang (`SEARCH`).
+ *
+ * El rang es demana amb un dia de marge (els `hour_ts` són UTC i els dies,
+ * locals), de manera que el dia més antic que hi queda dins pot sortir a mitges
+ * però el `LIMIT` el descarta, i els que es llisten són tots sencers.
+ *
+ * Amb dades seguides el resultat és idèntic al d'abans: els dies que en queden
+ * fora són els que el `LIMIT` ja descartava. El que sí que canvia és què vol
+ * dir el llistat si hi ha forats: passa a ser «els dies amb dades dels últims
+ * 400» i no «els últims 400 dies amb dades».
  */
 const DAYS_LISTED = 400;
+/**
+ * Vida a la cache de `/api/santroc`. No surt de `hourly` —llegeix
+ * `daily_santroc` i, per al dia d'avui, els minuts en viu—, així que no pot
+ * anar amb `DERIVED_FROM_HOURLY_TTL`. Deu minuts: el mínim de places lliures
+ * d'un dia no es mou gaire, i el tros viu és el més car de la consulta.
+ */
+const SANT_ROC_TTL = 600;
 /** Còpia pública de les dades (branca `data`), on la GitHub Action munta els CSV mensuals. */
 const DEFAULT_DATA_MIRROR_URL = "https://raw.githubusercontent.com/marcgallego/parking_terrassa/data/data";
 /**
@@ -691,9 +724,7 @@ export function mergeDaySeries(base: DaySeriesResponse, extra: DaySeriesResponse
   for (const p of base.parkings) byParking.set(p.parking_id, { ...p, points: [...p.points] });
   for (const p of extra.parkings) {
     const cur = byParking.get(p.parking_id);
-    // Amb un bucle i no amb `push(...punts)`: el tros viu és curt, però
-    // escampar un array llarg com a arguments té límit de pila.
-    if (cur) for (const pt of p.points) cur.points.push(pt);
+    if (cur) cur.points.push(...p.points);
     else byParking.set(p.parking_id, { ...p, points: [...p.points] });
   }
   return { day: base.day, parkings: [...byParking.values()].sort((a, b) => a.parking_id - b.parking_id) };
@@ -797,56 +828,69 @@ async function withCache(
  * dades —fins a 4.320 files cada vegada— per afegir-hi tres files noves. És, de
  * molt, la despesa de lectures més gran de tot el Worker.
  *
- * Aquí es parteix en dos trossos pel tall de l'hora UTC en curs:
+ * Per això es parteix en dos trossos, amb el tall a una hora UTC en punt:
  *
  * - **Tancat** (`local_date = dia AND ts < tall`): es guarda a la cache amb el
  *   tall a la clau, així que es llegeix de D1 un sol cop per hora.
- * - **Viu** (`ts >= tall`): entre una i dues hores de lectures. Va per la clau
- *   primària `(ts, parking_id)`, que és un recorregut de rang, i no per l'índex
- *   de `local_date`, que hauria de repassar totes les files del dia.
+ * - **Viu** (`tall <= ts < final de l'hora que corre`): poc més d'una hora de
+ *   lectures com a màxim. Va per la clau primària `(ts, parking_id)`, que és un
+ *   recorregut de rang, i no per l'índex de `local_date`, que hauria de
+ *   repassar totes les files del dia.
  *
- * El tall va a l'hora **anterior** a la que corre, no a la que corre. Congelar
- * el tros tancat just a l'hora en punt amagaria una lectura que arribés tard:
- * la captura de les 13:59 pot desar-se a les 14:00 passades (un cron que
- * s'endarrereix, o el reintent de cinc segons quan saba.es no publica les
- * places lliures), i si el tros tancat de les 14:00 ja s'hagués calculat sense
- * ella, aquell minut no es veuria fins a les 15:00. Amb una hora de marge, tota
- * lectura que arribi tard cau dins del tros viu, que es recalcula cada vegada.
- * La consulta d'abans es curava sola en un minut i això ho manté.
+ * La unió dels dos és exactament el mateix conjunt de files que la consulta
+ * d'abans: els dos predicats es reparteixen el dia sense solapar-se ni
+ * deixar-se res.
  *
- * La unió dels dos trossos és exactament el mateix conjunt de files que la
- * consulta d'abans, perquè els predicats `ts < tall` i `ts >= tall` es
- * reparteixen el dia sense solapar-se ni deixar-se res.
+ * El tall no cau a l'hora en punt sinó `LATE_WRITE_GRACE_S` enrere, per una
+ * lectura que arribi tard: la captura de les 13:59 es pot desar a les 14:00
+ * passades. Si el tros tancat de les 14:00 ja s'hagués congelat sense ella,
+ * aquell minut no es veuria fins a les 15:00; amb el marge cau al tros viu, que
+ * es recalcula a cada petició, com feia la consulta d'abans.
  *
  * La guarda: el tros viu s'identifica només pel `ts`, i això només val si tota
- * l'hora UTC del tall cau dins del mateix dia local. A Europe/Madrid (UTC+1 o
- * UTC+2) la mitjanit local sempre cau en punt i això es compleix sempre, però
- * `LOCAL_TZ` es pot canviar i hi ha zones amb desplaçaments de mitja hora. Per
- * això es comprova als dos extrems de l'hora —el mateix que fa
- * `cachedUtcOffsetMinutes`— i, si no es compleix, es torna a la consulta d'abans.
- * També hi torna per a qualsevol dia passat, que ja no té tros viu.
+ * la finestra de dues hores cau dins del mateix dia local. A Europe/Madrid
+ * (UTC+1 o UTC+2) la mitjanit local sempre cau en punt i sempre es compleix,
+ * però `LOCAL_TZ` es pot canviar i hi ha zones amb desplaçaments de mitja hora.
+ * Per això es comprova als dos extrems de la finestra, el mateix que fa
+ * `cachedUtcOffsetMinutes`. Si no es compleix, o si el dia demanat no és el
+ * d'avui, es fa la consulta del dia sencer d'abans.
  */
-export async function daySeries(request: Request, env: Env, day: string, tz: string, nowTs: number): Promise<DaySeriesResponse> {
-  const cutoff = Math.floor(nowTs / 3600) * 3600 - 3600;
+export async function daySeries(
+  request: Request,
+  env: Env,
+  day: string,
+  today: string,
+  tz: string,
+  nowTs: number,
+): Promise<DaySeriesResponse> {
+  const hour = Math.floor(nowTs / 3600) * 3600;
+  const cutoff = Math.floor((nowTs - LATE_WRITE_GRACE_S) / 3600) * 3600;
+  const liveEnd = hour + 3600; // el tros viu arriba fins al final de l'hora que corre
   const isDay = (ts: number): boolean => localParts(new Date(ts * 1000), tz).local_date === day;
-  if (!isDay(cutoff) || !isDay(cutoff + 2 * 3600 - 1)) {
+  if (day !== today || !isDay(cutoff) || !isDay(liveEnd - 1)) {
     return toDaySeries(day, await queryReadings(env, "r.local_date = ?1", [day]));
   }
-  // El tall és a la clau: cada hora n'estrena una entrada i la d'abans ja no es
-  // consulta mai més, de manera que el contingut no pot quedar mai obsolet.
-  const closedRes = await withCache(request, `/api/day/${day}/series?tancat=${cutoff}`, 86_400, async () =>
-    json(toDaySeries(day, await queryReadings(env, "r.local_date = ?1 AND r.ts < ?2", [day, cutoff])), {
-      maxAge: 86_400,
+  // Els dos trossos no depenen l'un de l'altre, així que van alhora: un sol
+  // viatge d'anada i tornada a D1 en lloc de dos.
+  let fresh: DaySeriesResponse | undefined;
+  const [closedRes, liveRows] = await Promise.all([
+    // El tall és a la clau: cada hora n'estrena una entrada i la d'abans no es
+    // consulta mai més, de manera que cap entrada no pot quedar obsoleta.
+    withCache(request, `/api/day/${day}/series?tancat=${cutoff}`, 86_400, async () => {
+      // Es guarda tal com es genera: si la cache falla, el tros ja el tenim com
+      // a objecte i no cal tornar a interpretar-ne els ~80 kB de JSON a sota.
+      fresh = toDaySeries(day, await queryReadings(env, "r.local_date = ?1 AND r.ts < ?2", [day, cutoff]));
+      return json(fresh);
     }),
-  );
-  const closed = (await closedRes.json()) as DaySeriesResponse;
-  // Acotat també per dalt: el tros viu ha de quedar dins de la finestra que la
-  // guarda ha comprovat. Cap lectura no pot ser posterior a ara (i ara hi és a
-  // dins), de manera que no en deixa fora cap; el que evita és que una fila amb
-  // un `ts` futur —un rellotge que va malament, una reescriptura a mà— s'acabi
-  // servint com a part d'un dia que no li toca.
-  const live = toDaySeries(day, await queryReadings(env, "r.ts >= ?1 AND r.ts < ?2", [cutoff, cutoff + 2 * 3600]));
-  return mergeDaySeries(closed, live);
+    // `liveEnd` acota el tros viu per dalt perquè no surti de la finestra que la
+    // guarda ha comprovat. Cap lectura no pot ser posterior a ara (i ara hi és a
+    // dins), així que no en deixa fora cap; el que evita és que una fila amb un
+    // `ts` futur —un rellotge que va malament, una reescriptura a mà— s'acabi
+    // servint com a part d'un dia que no li toca.
+    queryReadings(env, "r.ts >= ?1 AND r.ts < ?2", [cutoff, liveEnd]),
+  ]);
+  const closed = fresh ?? ((await closedRes.json()) as DaySeriesResponse);
+  return mergeDaySeries(closed, toDaySeries(day, liveRows));
 }
 
 // ---------------------------------------------------------------------------
@@ -936,7 +980,9 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     // Mateixa vida a la cache que el dia en format llarg. Una fallada de cache
     // aquí és barata: ni dates formatades ni camps derivats, ~70 KB per dia.
     const maxAge = isPast(day) ? 86_400 : 60;
-    return withCache(request, path, maxAge, async () => json(await daySeries(request, env, day, tz, nowTs), { maxAge }));
+    return withCache(request, path, maxAge, async () =>
+      json(await daySeries(request, env, day, today, tz, nowTs), { maxAge }),
+    );
   }
 
   // /api/day/AAAA-MM-DD (json)  |  /data/AAAA-MM-DD.csv
@@ -1050,7 +1096,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     const thrParam = Number(url.searchParams.get("threshold") ?? 25);
     const threshold: SantRocThreshold = (SANT_ROC_THRESHOLDS as readonly number[]).includes(thrParam) ? (thrParam as SantRocThreshold) : 25;
     const fromDay = localParts(new Date(Date.now() - (days - 1) * 86_400_000), tz).local_date;
-    return withCache(request, `${path}?days=${days}&threshold=${threshold}`, 600, async () => {
+    return withCache(request, `${path}?days=${days}&threshold=${threshold}`, SANT_ROC_TTL, async () => {
       const ids = SANT_ROC_PARKINGS.join(",");
       const [cap, closed, live] = await env.DB.batch<Record<string, unknown>>([
         env.DB.prepare(`SELECT SUM(capacity) AS capacity FROM parkings WHERE id IN (${ids})`),
@@ -1092,7 +1138,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
             minutes_below: r.minutes_below,
           })),
       };
-      return json(payload, { maxAge: 600 });
+      return json(payload, { maxAge: SANT_ROC_TTL });
     });
   }
 
@@ -1102,17 +1148,6 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     // com a suma de `n`, i costa unes seixanta vegades menys de llegir. Un dia
     // tancat hi és sencer; el dia en curs només hi surt fins a l'última hora
     // agregada, i el dashboard ja no en mostra el recompte.
-    //
-    // El `LIMIT` sol no evita res: s'aplica després d'agrupar, així que la
-    // consulta recorria `hourly` sencera (`SCAN`) i cada dia nou la feia una
-    // mica més cara, per sempre. Acotar-la pel `hour_ts` —que és el primer camp
-    // de la clau primària— la converteix en un recorregut de rang (`SEARCH`).
-    //
-    // Amb dades seguides això no canvia res: els dies que en queden fora són
-    // els que el `LIMIT` ja descartava. El que sí que canvia és què vol dir el
-    // llistat si hi ha forats: passa a ser «els dies amb dades dels últims 400»
-    // i no «els últims 400 dies amb dades», de manera que un dia anterior a la
-    // finestra no hi surt encara que se'n retornin menys de 400.
     return withCache(request, path, DERIVED_FROM_HOURLY_TTL, async () => {
       const { results } = await env.DB.prepare(
         `SELECT local_date AS day, SUM(n) AS rows_ FROM hourly
