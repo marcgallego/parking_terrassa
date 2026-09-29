@@ -116,6 +116,8 @@ export function timeAxis(mode: "clock" | "calendar"): uPlot.Axis {
   return {
     ...axisBase(),
     grid: { show: false },
+    // prou per a una línia d'etiquetes; el valor per defecte (50) deixa un buit sota l'eix
+    size: 30,
     space: mode === "clock" ? 48 : 72,
     values: (u, splits, _axis, _space, incr) =>
       splits.map((s, i) => {
