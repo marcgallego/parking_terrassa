@@ -144,8 +144,6 @@ footer { color: var(--text-muted); font-size: 0.85rem; margin-top: 24px; padding
 .u-over { cursor: crosshair; }
 .u-hz .u-cursor-x { border-right: 1px solid var(--text-muted); }
 .u-select { background: color-mix(in srgb, var(--text-primary) 8%, transparent); }
-.zoom-hint { margin: 6px 0 0; }
-@media (hover: none) { .zoom-hint { display: none; } }
 
 .tip { position: fixed; z-index: 10; pointer-events: none; background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 0.82rem; box-shadow: 0 4px 16px rgba(0,0,0,.12); max-width: 280px; }
 .tip b { display: block; margin-bottom: 4px; color: var(--text-secondary); font-weight: 600; }
