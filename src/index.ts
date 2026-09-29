@@ -98,9 +98,12 @@ const LATE_WRITE_GRACE_S = 300;
  * més cara, per sempre. Acotar-la pel `hour_ts` —que és el primer camp de la
  * clau primària— la converteix en un recorregut de rang (`SEARCH`).
  *
- * El rang es demana amb un dia de marge (els `hour_ts` són UTC i els dies,
- * locals), de manera que el dia més antic que hi queda dins pot sortir a mitges
- * però el `LIMIT` el descarta, i els que es llisten són tots sencers.
+ * El rang es demana amb un dia de marge i el dia del límit es descarta
+ * explícitament pel `local_date`: com que el tall és un instant UTC i els dies
+ * són locals, aquell dia hi entra a mitges i en sortiria el recompte curt. El
+ * `LIMIT` sol no el tapa, perquè només el descartaria si a la finestra hi
+ * hagués 401 dies amb dades. Amb el marge i el descart, els que es llisten són
+ * sempre sencers.
  *
  * Amb dades seguides el resultat és idèntic al d'abans: els dies que en queden
  * fora són els que el `LIMIT` ja descartava. El que sí que canvia és què vol
@@ -1149,11 +1152,17 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     // tancat hi és sencer; el dia en curs només hi surt fins a l'última hora
     // agregada, i el dashboard ja no en mostra el recompte.
     return withCache(request, path, DERIVED_FROM_HOURLY_TTL, async () => {
+      // El `hour_ts` acota el recorregut; el `local_date` descarta el dia del
+      // límit, que hi entra a mitges perquè el tall és un instant UTC i els dies
+      // són locals. Amb el `LIMIT` sol no n'hi ha prou: només el descartaria si
+      // a la finestra hi hagués 401 dies amb dades, i amb forats no hi són.
+      const from = nowTs - (DAYS_LISTED + 1) * 86_400;
       const { results } = await env.DB.prepare(
         `SELECT local_date AS day, SUM(n) AS rows_ FROM hourly
-         WHERE hour_ts >= ?1 GROUP BY local_date ORDER BY local_date DESC LIMIT ${DAYS_LISTED}`,
+         WHERE hour_ts >= ?1 AND local_date > ?2
+         GROUP BY local_date ORDER BY local_date DESC LIMIT ${DAYS_LISTED}`,
       )
-        .bind(nowTs - (DAYS_LISTED + 1) * 86_400)
+        .bind(from, localParts(new Date(from * 1000), tz).local_date)
         .all<{ day: string; rows_: number }>();
       const out: DayCount[] = results.map((r) => ({ day: r.day, rows: r.rows_ }));
       return json(out, { maxAge: DERIVED_FROM_HOURLY_TTL });
