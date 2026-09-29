@@ -18,6 +18,21 @@ export function $<T extends Element = HTMLElement>(sel: string, root: ParentNode
 
 export const logErr = (e: unknown): void => console.error(e);
 
+/**
+ * Crida `tick` cada `ms` mil·lisegons, però només mentre la pestanya es veu.
+ * Una pestanya oblidada en segon pla consultaria l'API tot el dia, i cada
+ * consulta del dia en curs llegeix milers de files de D1. En tornar a la
+ * pestanya, si ha passat l'interval, es posa al dia de seguida.
+ */
+export function everyWhileVisible(ms: number, tick: () => void): void {
+  let last = Date.now();
+  const run = (): void => { last = Date.now(); tick(); };
+  window.setInterval(() => { if (!document.hidden) run(); }, ms);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && Date.now() - last >= ms) run();
+  });
+}
+
 // ----- formats ---------------------------------------------------------------
 export const fmtTime = new Intl.DateTimeFormat("ca", { timeZone: TZ, hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 export const fmtDayTime = new Intl.DateTimeFormat("ca", { timeZone: TZ, weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });

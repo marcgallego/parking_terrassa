@@ -10,7 +10,7 @@
  */
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
-import { daySeries, mergeDaySeries, toDaySeries } from "../src/index";
+import { clearMemoryCache, daySeries, mergeDaySeries, toDaySeries } from "../src/index";
 import type { Env } from "../src/index";
 
 type Row = Parameters<typeof toDaySeries>[1][number] & { local_date: string };
@@ -76,6 +76,9 @@ function fakeDb(rows: Row[]) {
 const g = globalThis as unknown as { caches?: unknown };
 
 beforeEach(() => {
+  // La cache en memòria és de mòdul i sobreviuria d'una prova a l'altra: hi ha
+  // proves que comparteixen dia i tall, i per tant clau.
+  clearMemoryCache();
   const store = new Map<string, Response>();
   g.caches = {
     default: {

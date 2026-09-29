@@ -76,6 +76,13 @@ const HOURLY_CATCHUP_HOURS = 48;
  */
 const DERIVED_FROM_HOURLY_TTL = 900;
 /**
+ * Vida del tros tancat del dia en curs a la cache (vegeu `daySeries`). Com que
+ * el tall va a la clau, cada hora n'estrena una entrada i la d'abans no es
+ * torna a demanar mai: amb dues hores n'hi ha de sobra, i així les entrades
+ * mortes no es queden reservant lloc a la cache en memòria, que és acotada.
+ */
+const CLOSED_CHUNK_TTL = 7200;
+/**
  * Marge que es dona a una lectura per arribar tard abans de congelar el tros
  * tancat del dia en curs (vegeu `daySeries`). La captura de l'últim minut d'una
  * hora es pot desar ja passada l'hora: un cron endarrerit, o el reintent de
@@ -802,25 +809,81 @@ async function fetchMirror(url: string): Promise<Response> {
  * lectures noves a D1: totes les variants d'una mateixa consulta comparteixen
  * entrada. És el que evita que es pugui buidar la butxaca de lectures a base de
  * peticions amb paràmetres inventats.
+ *
+ * Compte: a `*.workers.dev`, que és on viu el Worker, l'API de cache de
+ * Cloudflare no fa res (`match` no troba mai res i `put` no desa res). Només
+ * funciona amb un domini propi. Per això hi ha, abans, una cache a la memòria
+ * de l'isolat: les peticions que arriben a la mateixa instància del Worker
+ * (les de Netlify, que surten de pocs servidors, hi van a parar sovint) es
+ * serveixen sense tornar a llegir D1. Els cossos grans que passen en streaming
+ * (el CSV mensual) no hi entren: `memory: false`.
  */
 async function withCache(
   request: Request,
   canonical: string,
   maxAge: number,
   producer: () => Promise<Response>,
+  { memory = true }: { memory?: boolean } = {},
 ): Promise<Response> {
+  const url = new URL(canonical, request.url).toString();
+  const useMemory = memory && maxAge > 0;
+  if (useMemory) {
+    const hit = memoryCacheGet(url);
+    if (hit) return hit;
+  }
   const cache = caches.default;
-  const key = new Request(new URL(canonical, request.url).toString(), { method: "GET" });
+  const key = new Request(url, { method: "GET" });
   const hit = await cache.match(key);
   if (hit) return hit;
   const res = await producer();
   if (res.ok && maxAge > 0) {
     const copy = new Response(res.body, res);
     copy.headers.set("Cache-Control", `public, max-age=${maxAge}`);
+    if (useMemory) {
+      const body = await copy.arrayBuffer();
+      memoryCachePut(url, body, copy, maxAge);
+      const out = new Response(body, copy);
+      await cache.put(key, out.clone());
+      return out;
+    }
     await cache.put(key, copy.clone());
     return copy;
   }
   return res;
+}
+
+/** Màxim d'entrades a la cache en memòria (cada una, com a molt uns centenars de KB). */
+const MEMORY_CACHE_MAX = 200;
+
+interface MemoryEntry {
+  body: ArrayBuffer;
+  status: number;
+  headers: [string, string][];
+  expires: number;
+}
+
+const memoryCache = new Map<string, MemoryEntry>();
+
+function memoryCacheGet(url: string): Response | undefined {
+  const e = memoryCache.get(url);
+  if (!e) return undefined;
+  if (e.expires <= Date.now()) {
+    memoryCache.delete(url);
+    return undefined;
+  }
+  return new Response(e.body.slice(0), { status: e.status, headers: e.headers });
+}
+
+function memoryCachePut(url: string, body: ArrayBuffer, res: Response, maxAge: number): void {
+  memoryCache.delete(url);
+  // Map conserva l'ordre d'inserció: la primera clau és la més antiga.
+  while (memoryCache.size >= MEMORY_CACHE_MAX) memoryCache.delete(memoryCache.keys().next().value as string);
+  memoryCache.set(url, { body, status: res.status, headers: [...res.headers], expires: Date.now() + maxAge * 1000 });
+}
+
+/** Només per a les proves: buida la cache en memòria. */
+export function clearMemoryCache(): void {
+  memoryCache.clear();
 }
 
 /**
@@ -879,7 +942,7 @@ export async function daySeries(
   const [closedRes, liveRows] = await Promise.all([
     // El tall és a la clau: cada hora n'estrena una entrada i la d'abans no es
     // consulta mai més, de manera que cap entrada no pot quedar obsoleta.
-    withCache(request, `/api/day/${day}/series?tancat=${cutoff}`, 86_400, async () => {
+    withCache(request, `/api/day/${day}/series?tancat=${cutoff}`, CLOSED_CHUNK_TTL, async () => {
       // Es guarda tal com es genera: si la cache falla, el tros ja el tenim com
       // a objecte i no cal tornar a interpretar-ne els ~80 kB de JSON a sota.
       fresh = toDaySeries(day, await queryReadings(env, "r.local_date = ?1 AND r.ts < ?2", [day, cutoff]));
@@ -1035,7 +1098,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       const encoding = upstream.headers.get("Content-Encoding");
       if (encoding) res.headers.set("Content-Encoding", encoding);
       return res;
-    });
+    }, { memory: false });
   }
 
   if (path === "/api/hourly") {

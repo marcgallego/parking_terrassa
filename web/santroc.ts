@@ -1,7 +1,7 @@
 /* Pàgina del Portal de Sant Roc: places lliures sumades d'Ajuntament-Mercat i Plaça Vella. */
 import { getJson } from "./api";
 import type { DaySeriesParking, DaySeriesResponse, HourlyRecord, SantRocDay, SantRocResponse, Slug } from "./api";
-import { $, COLOR_VAR, NAMES, SANT_ROC, addDays, atSec, chips, cssVar, esc, fmtDate, fmtDay, fmtDayTime, fmtTime, localToday, logErr, pct1, renderStatus, setChip, setNotice, staleNotice, tableHtml, tipRow, zonedMidnight } from "./common";
+import { $, COLOR_VAR, NAMES, SANT_ROC, addDays, atSec, chips, cssVar, esc, everyWhileVisible, fmtDate, fmtDay, fmtDayTime, fmtTime, localToday, logErr, pct1, renderStatus, setChip, setNotice, staleNotice, tableHtml, tipRow, zonedMidnight } from "./common";
 import { alignSeries, barSeries, baseOptions, clickPlugin, lineSeries, mount, refLinePlugin, timeAxis, tooltipPlugin, valueAxis } from "./charts";
 
 // Aquesta pàgina és la portada; els enllaços antics a la de tots els pàrquings (/?range=, /?weeks=) porten a /saba.
@@ -418,7 +418,7 @@ if (!legacy) {
   else loadHourly(interval).catch(logErr);
   loadPeriod().catch(logErr);
 
-  window.setInterval(() => {
+  everyWhileVisible(60_000, () => {
     const t = localToday();
     // Si passa la mitjanit, qui mirava «avui» continua mirant avui.
     if (t !== todayDay && day === todayDay) { day = t; syncUrl(); }
@@ -426,5 +426,5 @@ if (!legacy) {
     if (interval !== "dia") loadHourly(interval).catch(logErr);
     // Els dies complets només canvien quan canvia el dia.
     if (periodDay && periodDay !== t) loadPeriod().catch(logErr);
-  }, 60_000);
+  });
 }
