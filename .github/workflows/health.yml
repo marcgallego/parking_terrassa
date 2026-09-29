@@ -1,6 +1,7 @@
 # Vigila que la captura segueixi viva. /api/status respon 503 si fa massa estona
 # que no s'escriu cap lectura, si hi ha errors de captura recents o si la
-# capacitat publicada per saba.es ha canviat. Si falla, GitHub envia un avís.
+# capacitat publicada per saba.es ha canviat. Comprova també que la web pública
+# de Netlify respongui. Si falla, GitHub envia un avís.
 name: Salut de la captura
 
 on:
@@ -33,3 +34,25 @@ jobs:
           done
           echo "::error::/api/status ha respost $code"
           exit 1
+
+      # La web pública és a Netlify, que passa /api/* al Worker. Es comprova a
+      # part: si Netlify aturés el projecte (per exemple, en arribar al límit del
+      # pla gratuït), la captura continuaria bé i el pas anterior no se
+      # n'adonaria. Corre encara que aquell falli, per saber-ho tot alhora.
+      - name: Consulta la web pública
+        if: ${{ !cancelled() }}
+        env:
+          PUBLIC_URL: https://parking-terrassa.netlify.app
+        run: |
+          set -uo pipefail
+          fail=0
+          if ! curl -fsS --retry 2 --max-time 30 -o index.html "$PUBLIC_URL/" || ! grep -q 'build/santroc.js' index.html; then
+            echo "::error::$PUBLIC_URL/ no serveix el dashboard"
+            fail=1
+          fi
+          if ! curl -fsS --retry 2 --max-time 30 -o parkings.json "$PUBLIC_URL/api/parkings" || ! jq -e 'length > 0' parkings.json > /dev/null; then
+            echo "::error::$PUBLIC_URL/api/parkings no arriba al Worker"
+            fail=1
+          fi
+          if [ "$fail" = 0 ]; then echo "la web pública respon"; fi
+          exit "$fail"
