@@ -799,12 +799,20 @@ async function withCache(
  *
  * Aquí es parteix en dos trossos pel tall de l'hora UTC en curs:
  *
- * - **Tancat** (`local_date = dia AND ts < tall`): la captura només escriu el
- *   minut en curs, de manera que aquest tros ja no pot canviar. Es guarda a la
- *   cache amb el tall a la clau, així que es llegeix de D1 un sol cop per hora.
- * - **Viu** (`ts >= tall`): com a molt una hora de lectures. Va per la clau
+ * - **Tancat** (`local_date = dia AND ts < tall`): es guarda a la cache amb el
+ *   tall a la clau, així que es llegeix de D1 un sol cop per hora.
+ * - **Viu** (`ts >= tall`): entre una i dues hores de lectures. Va per la clau
  *   primària `(ts, parking_id)`, que és un recorregut de rang, i no per l'índex
  *   de `local_date`, que hauria de repassar totes les files del dia.
+ *
+ * El tall va a l'hora **anterior** a la que corre, no a la que corre. Congelar
+ * el tros tancat just a l'hora en punt amagaria una lectura que arribés tard:
+ * la captura de les 13:59 pot desar-se a les 14:00 passades (un cron que
+ * s'endarrereix, o el reintent de cinc segons quan saba.es no publica les
+ * places lliures), i si el tros tancat de les 14:00 ja s'hagués calculat sense
+ * ella, aquell minut no es veuria fins a les 15:00. Amb una hora de marge, tota
+ * lectura que arribi tard cau dins del tros viu, que es recalcula cada vegada.
+ * La consulta d'abans es curava sola en un minut i això ho manté.
  *
  * La unió dels dos trossos és exactament el mateix conjunt de files que la
  * consulta d'abans, perquè els predicats `ts < tall` i `ts >= tall` es
@@ -819,9 +827,9 @@ async function withCache(
  * També hi torna per a qualsevol dia passat, que ja no té tros viu.
  */
 export async function daySeries(request: Request, env: Env, day: string, tz: string, nowTs: number): Promise<DaySeriesResponse> {
-  const cutoff = Math.floor(nowTs / 3600) * 3600;
+  const cutoff = Math.floor(nowTs / 3600) * 3600 - 3600;
   const isDay = (ts: number): boolean => localParts(new Date(ts * 1000), tz).local_date === day;
-  if (!isDay(cutoff) || !isDay(cutoff + 3599)) {
+  if (!isDay(cutoff) || !isDay(cutoff + 2 * 3600 - 1)) {
     return toDaySeries(day, await queryReadings(env, "r.local_date = ?1", [day]));
   }
   // El tall és a la clau: cada hora n'estrena una entrada i la d'abans ja no es
@@ -832,12 +840,12 @@ export async function daySeries(request: Request, env: Env, day: string, tz: str
     }),
   );
   const closed = (await closedRes.json()) as DaySeriesResponse;
-  // Acotat també per dalt: el tros viu ha de quedar dins de l'hora que la guarda
-  // ha comprovat. Cap lectura no pot ser posterior a ara (i ara és dins d'aquesta
-  // hora), de manera que no en deixa fora cap; el que evita és que una fila amb
+  // Acotat també per dalt: el tros viu ha de quedar dins de la finestra que la
+  // guarda ha comprovat. Cap lectura no pot ser posterior a ara (i ara hi és a
+  // dins), de manera que no en deixa fora cap; el que evita és que una fila amb
   // un `ts` futur —un rellotge que va malament, una reescriptura a mà— s'acabi
   // servint com a part d'un dia que no li toca.
-  const live = toDaySeries(day, await queryReadings(env, "r.ts >= ?1 AND r.ts < ?2", [cutoff, cutoff + 3600]));
+  const live = toDaySeries(day, await queryReadings(env, "r.ts >= ?1 AND r.ts < ?2", [cutoff, cutoff + 2 * 3600]));
   return mergeDaySeries(closed, live);
 }
 
@@ -1098,9 +1106,13 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     // El `LIMIT` sol no evita res: s'aplica després d'agrupar, així que la
     // consulta recorria `hourly` sencera (`SCAN`) i cada dia nou la feia una
     // mica més cara, per sempre. Acotar-la pel `hour_ts` —que és el primer camp
-    // de la clau primària— la converteix en un recorregut de rang (`SEARCH`)
-    // amb el mateix resultat: els dies que en queden fora són els que el
-    // `LIMIT` ja descartava.
+    // de la clau primària— la converteix en un recorregut de rang (`SEARCH`).
+    //
+    // Amb dades seguides això no canvia res: els dies que en queden fora són
+    // els que el `LIMIT` ja descartava. El que sí que canvia és què vol dir el
+    // llistat si hi ha forats: passa a ser «els dies amb dades dels últims 400»
+    // i no «els últims 400 dies amb dades», de manera que un dia anterior a la
+    // finestra no hi surt encara que se'n retornin menys de 400.
     return withCache(request, path, DERIVED_FROM_HOURLY_TTL, async () => {
       const { results } = await env.DB.prepare(
         `SELECT local_date AS day, SUM(n) AS rows_ FROM hourly

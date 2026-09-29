@@ -197,12 +197,35 @@ test("a Europe/Madrid la partició val també el dia del canvi d'hora", async ()
 test("una lectura amb un `ts` futur no s'escola al tros viu", async () => {
   const rows = dayRows(DAY, DAY_START_UTC, 700);
   const nowTs = rows[rows.length - 1]!.ts;
-  const cutoff = Math.floor(nowTs / 3600) * 3600;
-  // Una fila amb el `ts` de l'hora següent, amb el `local_date` d'avui: la
-  // consulta del tros viu va pel `ts`, i sense el límit de dalt se l'enduria.
-  const futura = { ...rows[0]!, ts: cutoff + 3600 + 60 };
+  // El tall és l'hora anterior a la que corre, i el tros viu arriba fins a dues
+  // hores més enllà: la fila de prova ha de quedar per sobre d'aquest límit.
+  const cutoff = Math.floor(nowTs / 3600) * 3600 - 3600;
+  const futura = { ...rows[0]!, ts: cutoff + 2 * 3600 + 60 };
   fakeCaches();
   const { env } = fakeDb([...rows, futura]);
   const out = await daySeries(req(DAY), env, DAY, "Europe/Madrid", nowTs);
   assert.deepEqual(out, toDaySeries(DAY, rows));
+});
+
+test("una lectura que arriba tard surt de seguida, no una hora després", async () => {
+  // La captura de l'últim minut d'una hora es pot desar ja passada l'hora (un
+  // cron endarrerit, o el reintent de cinc segons). Si el tros tancat es
+  // congelés a l'hora en punt, aquell minut no es veuria fins a l'hora següent.
+  const rows = dayRows(DAY, DAY_START_UTC, 840); // fins a les 12:00 UTC, dia local a mig fer
+  const horaEnPunt = DAY_START_UTC + 840 * 60;
+  const tardana = dayRows(DAY, horaEnPunt - 60, 1); // el minut 13:59, encara no desat
+  fakeCaches();
+  const vives = [...rows];
+  const { env } = fakeDb(vives);
+
+  // Primera petició, just passada l'hora: encara no hi és i es calcula el tros tancat.
+  const abans = await daySeries(req(DAY), env, DAY, "Europe/Madrid", horaEnPunt + 5);
+  assert.deepEqual(abans, toDaySeries(DAY, rows));
+
+  // Ara arriba la lectura endarrerida, amb el `ts` de l'hora que ja ha passat.
+  vives.push(...tardana);
+
+  // La petició següent l'ha de portar, sense esperar el tall de l'hora vinent.
+  const despres = await daySeries(req(DAY), env, DAY, "Europe/Madrid", horaEnPunt + 65);
+  assert.deepEqual(despres, toDaySeries(DAY, [...rows, ...tardana]));
 });
