@@ -2,7 +2,7 @@
 import type uPlot from "uplot";
 import { getJson } from "./api";
 import type { DayCount, DaySeriesParking, DaySeriesResponse, HeatmapResponse, HourlyRecord, LatestResponse, Slug } from "./api";
-import { $, COLOR_VAR, NAMES, ORDER, addDays, atSec, chips, cssVar, esc, fmtDate, fmtDayTime, fmtTime, hideTip, localToday, logErr, occupancyPct, onThemeChange, pad2, pct1, renderStatus, seq, setNotice, showTip, staleNotice, tableHtml, tipRow, zonedMidnight } from "./common";
+import { $, COLOR_VAR, NAMES, ORDER, addDays, atSec, chips, cssVar, esc, everyWhileVisible, fmtDate, fmtDayTime, fmtTime, hideTip, localToday, logErr, occupancyPct, onThemeChange, pad2, pct1, renderStatus, seq, setNotice, showTip, staleNotice, tableHtml, tipRow, zonedMidnight } from "./common";
 import { alignSeries, baseOptions, lineSeries, mount, setSeriesShown, sparkOptions, timeAxis, tooltipPlugin, valueAxis } from "./charts";
 
 const DOW = ["dl", "dt", "dc", "dj", "dv", "ds", "dg"] as const;
@@ -265,7 +265,7 @@ void refreshLatest();
 loadRange(range).catch(logErr);
 loadHeat(weeks).catch(logErr);
 loadDownloads().catch(logErr);
-window.setInterval(() => {
+everyWhileVisible(60_000, () => {
   void refreshLatest();
   if (range === "today") loadRange("today").catch(logErr);
-}, 60_000);
+});
